@@ -1,4 +1,4 @@
-// odin
+// cargo
 
 > cd source-code
-> odin build .
+> cargo build --release
