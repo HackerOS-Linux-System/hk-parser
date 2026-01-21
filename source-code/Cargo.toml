@@ -1,1 +1,18 @@
+[package]
+name = "hacker-lang"
+version = "1.5"
+authors = ["HackerOS Team <hackeros068@gmail.com>"]
+edition = "2021"
+license = "MIT"
+description = "Programing language for HackerOS - Configuration part (.hk files)."
+readme = "README.md"
+repository = ""  # Add your repository URL if available
+keywords = ["hacker-lang", "parser", "configuration"]
+categories = ["parser-implementations"]
 
+[dependencies]
+nom = "7.1.3"  # For parsing the .hk format
+
+[lib]
+name = "hacker_lang"
+path = "src/lib.rs"
