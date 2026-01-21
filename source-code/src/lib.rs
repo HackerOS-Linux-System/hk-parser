@@ -6,9 +6,9 @@
 //! error handling.
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until},
-    character::complete::{multispace0, multispace1, newline, not_line_ending, satisfy},
-    combinator::{map, opt, recognize},
+    bytes::complete::{tag, take_until, take_while, take_while1},
+    character::complete::{multispace0, multispace1},
+    combinator::{eof, map, opt, peek},
     error::context,
     multi::{many0, many1},
     sequence::{delimited, preceded, terminated, tuple},
@@ -39,53 +39,53 @@ pub enum HkError {
 }
 /// Parses a .hk file from a string input.
 pub fn parse_hk(input: &str) -> Result<HkConfig, HkError> {
-    let mut line_num = 1;
-    let mut remaining = input;
+    let mut remaining = input.as_bytes();
     let mut config = HashMap::new();
     while !remaining.is_empty() {
-        let (rest, _) = match multispace0::<&str, nom::error::Error<&str>>(remaining) {
+        let (rest, _) = match multispace0::<&[u8], nom::error::Error<&[u8]>>(remaining) {
             Ok(v) => v,
             Err(e) => return Err(HkError::Parse {
-                line: line_num,
-                message: e.to_string(),
+                line: 1,
+                message: format!("Parse error: {}", e),
             }),
         };
         remaining = rest;
         if remaining.is_empty() {
             break;
         }
-        if remaining.starts_with('!') {
+        if remaining.starts_with(b"!") {
             // Skip comment line
             let (rest, _) = match comment(remaining) {
                 Ok(v) => v,
                 Err(e) => return Err(HkError::Parse {
-                    line: line_num,
-                    message: e.to_string(),
+                    line: 1,
+                    message: format!("Parse error: {}", e),
                 }),
             };
             remaining = rest;
-            line_num += 1;
             continue;
         }
         match section(remaining) {
             Ok((rest, (name, values))) => {
                 config.insert(name, HkValue::Map(values));
                 remaining = rest;
-                line_num += count_lines(input) - count_lines(remaining) + 1; // Better approximation
             }
             Err(e) => {
+                let remaining_input = match &e {
+                    nom::Err::Error(err) | nom::Err::Failure(err) => err.input,
+                    nom::Err::Incomplete(_) => input.as_bytes(),
+                };
+                let consumed_len = input.as_bytes().len() - remaining_input.len();
+                let consumed_bytes = &input.as_bytes()[0..consumed_len];
+                let line = consumed_bytes.iter().filter(|&&b| b == b'\n').count() + 1;
                 return Err(HkError::Parse {
-                    line: line_num,
-                    message: e.to_string(),
+                    line,
+                    message: format!("Parse error: {}", e),
                 });
             }
         }
     }
     Ok(config)
-}
-/// Counts the number of lines in a string (for error reporting).
-fn count_lines(s: &str) -> usize {
-    s.lines().count()
 }
 /// Loads and parses a .hk file from the given path.
 pub fn load_hk_file<P: AsRef<Path>>(path: P) -> Result<HkConfig, HkError> {
@@ -129,35 +129,36 @@ pub fn write_hk_file<P: AsRef<Path>>(path: P, config: &HkConfig) -> io::Result<(
     file.write_all(serialize_hk(config).as_bytes())
 }
 // Parser combinators
-fn comment<'a>(input: &'a str) -> IResult<&'a str, &'a str, nom::error::Error<&'a str>> {
+fn comment<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8], nom::error::Error<&'a [u8]>> {
     context(
         "comment",
-        delimited(
-            tag::<&str, &'a str, nom::error::Error<&'a str>>("!"),
-                  not_line_ending::<&'a str, nom::error::Error<&'a str>>,
-                  opt(newline::<&'a str, nom::error::Error<&'a str>>)
-        ),
+        delimited(tag(b"!"), take_while(|c| c != b'\r' && c != b'\n'), opt(tag(b"\n"))),
     )(input)
 }
-fn section<'a>(input: &'a str) -> IResult<&'a str, (String, HashMap<String, HkValue>), nom::error::Error<&'a str>> {
+fn section<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HashMap<String, HkValue>), nom::error::Error<&'a [u8]>> {
     context(
         "section",
         map(
             tuple((
-                delimited(
-                    tag::<&str, &'a str, nom::error::Error<&'a str>>("["),
-                          take_until::<&str, &'a str, nom::error::Error<&'a str>>("]"),
-                          tag::<&str, &'a str, nom::error::Error<&'a str>>("]")
-                ),
-                multispace0::<&'a str, nom::error::Error<&'a str>>,
-                many0(alt((nested_key_value, key_value))),
+                delimited(tag(b"["), take_until(&b"]"[..]), tag(b"]")),
+                   multispace0,
+                   terminated(
+                       many0(alt((
+                           map(comment, |_| None),
+                                  map(key_value, Some),
+                                  map(nested_key_value, Some),
+                       ))),
+                       peek(alt((tag(b"["), map(eof, |_| &[] as &[u8])))),
+                   ),
             )),
-            |(name, _, pairs)| {
+            |(name, _, opt_pairs)| {
                 let mut map = HashMap::new();
-                for (key, value) in pairs {
-                    insert_nested(&mut map, key.split('.').collect::<Vec<_>>(), value);
+                for pair_opt in opt_pairs {
+                    if let Some((key, value)) = pair_opt {
+                        insert_nested(&mut map, key.split('.').collect::<Vec<_>>(), value);
+                    }
                 }
-                (name.trim().to_string(), map)
+                (std::str::from_utf8(name).unwrap().trim().to_string(), map)
             },
         ),
     )(input)
@@ -178,78 +179,57 @@ fn insert_nested(map: &mut HashMap<String, HkValue>, keys: Vec<&str>, value: HkV
         current.insert((*last_key).to_string(), value);
     }
 }
-fn key_value<'a>(input: &'a str) -> IResult<&'a str, (String, HkValue), nom::error::Error<&'a str>> {
+fn key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "key_value",
         map(
             tuple((
-                preceded(
-                    tuple((
-                        multispace0::<&'a str, nom::error::Error<&'a str>>,
-                        tag::<&str, &'a str, nom::error::Error<&'a str>>("->"),
-                           multispace1::<&'a str, nom::error::Error<&'a str>>
-                    )),
-                    recognize(many1(satisfy(|c| c.is_alphanumeric() || c == '_')))
-                ),
-                multispace0::<&'a str, nom::error::Error<&'a str>>,
-                tag::<&str, &'a str, nom::error::Error<&'a str>>("=>"),
-                   multispace0::<&'a str, nom::error::Error<&'a str>>,
-                   terminated(
-                       not_line_ending::<&'a str, nom::error::Error<&'a str>>,
-                       opt(newline::<&'a str, nom::error::Error<&'a str>>)
-                   ),
+                preceded(tuple((multispace0, tag(b"->"), multispace1)), take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_')),
+                   multispace0,
+                   tag(b"=>"),
+                   multispace0,
+                   terminated(take_while(|c| c != b'\r' && c != b'\n'), opt(tag(b"\n"))),
             )),
-            |(key, _, _, _, value)| (key.trim().to_string(), HkValue::String(value.trim().to_string())),
+            |(key, _, _, _, value)| (
+                std::str::from_utf8(key).unwrap().trim().to_string(),
+                                     HkValue::String(std::str::from_utf8(value).unwrap().trim().to_string()),
+            ),
         ),
     )(input)
 }
-fn nested_key_value<'a>(input: &'a str) -> IResult<&'a str, (String, HkValue), nom::error::Error<&'a str>> {
+fn nested_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "nested_key_value",
         map(
             tuple((
-                preceded(
-                    tuple((
-                        multispace0::<&'a str, nom::error::Error<&'a str>>,
-                        tag::<&str, &'a str, nom::error::Error<&'a str>>("->"),
-                           multispace1::<&'a str, nom::error::Error<&'a str>>
-                    )),
-                    recognize(many1(satisfy(|c| c.is_alphanumeric() || c == '_')))
-                ),
-                many1(sub_key_value),
+                preceded(tuple((multispace0, tag(b"->"), multispace1)), take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_')),
+                   many1(sub_key_value),
             )),
             |(key, sub_pairs)| {
                 let mut sub_map = HashMap::new();
                 for (sub_key, sub_value) in sub_pairs {
                     sub_map.insert(sub_key, sub_value);
                 }
-                (key.trim().to_string(), HkValue::Map(sub_map))
+                (std::str::from_utf8(key).unwrap().trim().to_string(), HkValue::Map(sub_map))
             },
         ),
     )(input)
 }
-fn sub_key_value<'a>(input: &'a str) -> IResult<&'a str, (String, HkValue), nom::error::Error<&'a str>> {
+fn sub_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "sub_key_value",
         map(
             tuple((
-                preceded(
-                    tuple((
-                        multispace1::<&'a str, nom::error::Error<&'a str>>,
-                        tag::<&str, &'a str, nom::error::Error<&'a str>>("-->"),
-                           multispace1::<&'a str, nom::error::Error<&'a str>>
-                    )),
-                    recognize(many1(satisfy(|c| c.is_alphanumeric() || c == '_')))
-                ),
-                multispace0::<&'a str, nom::error::Error<&'a str>>,
-                tag::<&str, &'a str, nom::error::Error<&'a str>>("=>"),
-                   multispace0::<&'a str, nom::error::Error<&'a str>>,
-                   terminated(
-                       not_line_ending::<&'a str, nom::error::Error<&'a str>>,
-                       opt(newline::<&'a str, nom::error::Error<&'a str>>)
-                   ),
+                preceded(tuple((multispace1, tag(b"-->"), multispace1)), take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'_')),
+                   multispace0,
+                   tag(b"=>"),
+                   multispace0,
+                   terminated(take_while(|c| c != b'\r' && c != b'\n'), opt(tag(b"\n"))),
             )),
-            |(sub_key, _, _, _, sub_value)| (sub_key.trim().to_string(), HkValue::String(sub_value.trim().to_string())),
+            |(sub_key, _, _, _, sub_value)| (
+                std::str::from_utf8(sub_key).unwrap().trim().to_string(),
+                                             HkValue::String(std::str::from_utf8(sub_value).unwrap().trim().to_string()),
+            ),
         ),
     )(input)
 }
@@ -324,7 +304,7 @@ mod tests {
         let err = parse_hk(invalid_input).unwrap_err();
         match err {
             HkError::Parse { line, message } => {
-                assert_eq!(line, 1);
+                assert_eq!(line, 3);
                 assert!(message.contains("Parse error"));
             }
             _ => panic!("Unexpected error"),
