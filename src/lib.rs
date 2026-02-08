@@ -19,16 +19,19 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use thiserror::Error;
+
 /// Represents the structure of a .hk file.
 /// Sections are top-level keys in the outer HashMap.
 /// Values can be simple strings or nested HashMaps for subsections.
 pub type HkConfig = HashMap<String, HkValue>;
+
 /// Enum for values in the .hk config: either a simple string or a nested map.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HkValue {
     String(String),
     Map(HashMap<String, HkValue>),
 }
+
 /// Custom error type for parsing .hk files.
 #[derive(Error, Debug)]
 pub enum HkError {
@@ -37,6 +40,7 @@ pub enum HkError {
     #[error("Parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
 }
+
 /// Parses a .hk file from a string input.
 pub fn parse_hk(input: &str) -> Result<HkConfig, HkError> {
     let mut remaining = input.as_bytes();
@@ -87,6 +91,7 @@ pub fn parse_hk(input: &str) -> Result<HkConfig, HkError> {
     }
     Ok(config)
 }
+
 /// Loads and parses a .hk file from the given path.
 pub fn load_hk_file<P: AsRef<Path>>(path: P) -> Result<HkConfig, HkError> {
     let file = File::open(path)?;
@@ -98,6 +103,7 @@ pub fn load_hk_file<P: AsRef<Path>>(path: P) -> Result<HkConfig, HkError> {
     }
     parse_hk(&contents)
 }
+
 /// Serializes a HkConfig back to a .hk string.
 pub fn serialize_hk(config: &HkConfig) -> String {
     let mut output = String::new();
@@ -110,6 +116,7 @@ pub fn serialize_hk(config: &HkConfig) -> String {
     }
     output.trim_end().to_string()
 }
+
 fn serialize_map(map: &HashMap<String, HkValue>, indent: usize, output: &mut String) {
     for (key, value) in map {
         match value {
@@ -123,11 +130,13 @@ fn serialize_map(map: &HashMap<String, HkValue>, indent: usize, output: &mut Str
         }
     }
 }
+
 /// Writes a HkConfig to a file.
 pub fn write_hk_file<P: AsRef<Path>>(path: P, config: &HkConfig) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(serialize_hk(config).as_bytes())
 }
+
 // Parser combinators
 fn comment<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8], nom::error::Error<&'a [u8]>> {
     context(
@@ -135,6 +144,7 @@ fn comment<'a>(input: &'a [u8]) -> IResult<&'a [u8], &'a [u8], nom::error::Error
         delimited(tag(b"!"), take_while(|c| c != b'\r' && c != b'\n'), opt(tag(b"\n"))),
     )(input)
 }
+
 fn section<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HashMap<String, HkValue>), nom::error::Error<&'a [u8]>> {
     context(
         "section",
@@ -148,7 +158,11 @@ fn section<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HashMap<String, Hk
                                   map(key_value, Some),
                                   map(nested_key_value, Some),
                        ))),
-                       peek(alt((tag(b"["), map(eof, |_| &[] as &[u8])))),
+                       // Fix: consume potential whitespace before peeking for [ or EOF
+                       tuple((
+                           multispace0,
+                           peek(alt((tag(b"["), map(eof, |_| &[] as &[u8]))))
+                       )),
                    ),
             )),
             |(name, _, opt_pairs)| {
@@ -163,6 +177,7 @@ fn section<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HashMap<String, Hk
         ),
     )(input)
 }
+
 /// Inserts a value into a nested map using dot-separated keys.
 fn insert_nested(map: &mut HashMap<String, HkValue>, keys: Vec<&str>, value: HkValue) {
     let mut current = map;
@@ -179,6 +194,7 @@ fn insert_nested(map: &mut HashMap<String, HkValue>, keys: Vec<&str>, value: HkV
         current.insert((*last_key).to_string(), value);
     }
 }
+
 fn key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "key_value",
@@ -197,6 +213,7 @@ fn key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::e
         ),
     )(input)
 }
+
 fn nested_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "nested_key_value",
@@ -215,6 +232,7 @@ fn nested_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue),
         ),
     )(input)
 }
+
 fn sub_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), nom::error::Error<&'a [u8]>> {
     context(
         "sub_key_value",
@@ -233,10 +251,12 @@ fn sub_key_value<'a>(input: &'a [u8]) -> IResult<&'a [u8], (String, HkValue), no
         ),
     )(input)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
     #[test]
     fn test_parse_hk_with_comments() {
         let input = r#"
@@ -259,6 +279,7 @@ mod tests {
         "#;
         let result = parse_hk(input).unwrap();
         assert_eq!(result.len(), 3);
+
         if let Some(HkValue::Map(metadata)) = result.get("metadata") {
             assert_eq!(metadata.len(), 4);
             assert_eq!(metadata.get("name"), Some(&HkValue::String("Hacker Lang".to_string())));
@@ -266,14 +287,17 @@ mod tests {
             assert_eq!(metadata.get("authors"), Some(&HkValue::String("HackerOS Team <hackeros068@gmail.com>".to_string())));
             assert_eq!(metadata.get("license"), Some(&HkValue::String("MIT".to_string())));
         }
+
         if let Some(HkValue::Map(description)) = result.get("description") {
             assert_eq!(description.len(), 2);
             assert_eq!(description.get("summary"), Some(&HkValue::String("Programing language for HackerOS.".to_string())));
             assert_eq!(description.get("long"), Some(&HkValue::String("Język programowania Hacker Lang z plikami konfiguracyjnymi .hk lub .hacker lub skryptami itd. .hl.".to_string())));
         }
+
         if let Some(HkValue::Map(specs)) = result.get("specs") {
             assert_eq!(specs.len(), 2);
             assert_eq!(specs.get("rust"), Some(&HkValue::String(">= 1.92.0".to_string())));
+
             if let Some(HkValue::Map(deps)) = specs.get("dependencies") {
                 assert_eq!(deps.len(), 4);
                 assert_eq!(deps.get("odin"), Some(&HkValue::String(">= 2026-01".to_string())));
@@ -283,6 +307,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn test_serialize_hk() {
         let mut config = HashMap::new();
@@ -295,6 +320,7 @@ mod tests {
         assert!(serialized.contains("-> name => Hacker Lang"));
         assert!(serialized.contains("-> version => 1.5"));
     }
+
     #[test]
     fn test_error_handling() {
         let invalid_input = r#"
