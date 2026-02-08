@@ -1,6 +1,6 @@
 [package]
 name = "hk-parser"
-version = "1.6.2"
+version = "0.0.1"
 authors = ["HackerOS Team <hackeros068@gmail.com>"]
 edition = "2021"
 license = "MIT"
