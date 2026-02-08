@@ -6,7 +6,7 @@ edition = "2021"
 license = "MIT"
 description = "A robust parser and serializer for Hacker Lang configuration files (.hk)."
 readme = "README.md"
-repository = "" # Add your repository URL if available
+repository = "https://github.com/Bytes-Repository/hk-parser.git" # Add your repository URL if available
 keywords = ["hacker-lang", "parser", "configuration", "hk-format"]
 categories = ["parser-implementations", "config"]
 
