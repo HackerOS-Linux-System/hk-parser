@@ -1,6 +1,6 @@
 [package]
-name = "hacker_lang-config"
-version = "1.5.0"
+name = "hk-parser"
+version = "1.6.2"
 authors = ["HackerOS Team <hackeros068@gmail.com>"]
 edition = "2021"
 license = "MIT"
