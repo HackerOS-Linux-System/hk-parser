@@ -5,7 +5,6 @@ A robust parser and serializer for Hacker Lang configuration files (.hk).
 [![Crates.io](https://img.shields.io/crates/v/hk-parser.svg)](https://crates.io/crates/hk-parser)
 [![Docs.rs](https://docs.rs/hk-parser/badge.svg)](https://docs.rs/hk-parser)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://github.com/Bytes-Repository/hk-parser/workflows/CI/badge.svg)](https://github.com/Bytes-Repository/hk-parser/actions)
 
 ## Overview
 
