@@ -17,8 +17,6 @@ indexmap = "2.1.0"
 thiserror = "1.0"
 regex = "1.10.3"
 lazy_static = "1.4.0"
-syn = { version = "2.0", features = ["full"] }
-quote = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
@@ -27,4 +25,3 @@ pretty_assertions = "1.4"
 [lib]
 name = "hk_parser"
 path = "src/lib.rs"
-proc-macro = true
