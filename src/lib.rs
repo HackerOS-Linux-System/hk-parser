@@ -1,32 +1,14 @@
-// src/lib.rs
-//! Hacker Lang Configuration Parser
-//!
-//! This crate provides a robust parser and serializer for .hk files used in Hacker Lang.
-//! It supports nested structures, comments, and error handling.
-
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_until, take_while, take_while1},
-    character::complete::{multispace0, multispace1},
-    combinator::{eof, map, opt, peek},
-    error::{context, VerboseError, VerboseErrorKind},
-    multi::{many0, many1, separated_list0},
-    sequence::{delimited, preceded, terminated, tuple},
-    IResult,
-};
-use nom_locate::LocatedSpan;
 use regex::Regex;
+use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::str::FromStr;
 use thiserror::Error;
-
-type Span<'a> = LocatedSpan<&'a str>;
-type ParseResult<'a, T> = IResult<Span<'a>, T, VerboseError<Span<'a>>>;
+use colored::Colorize;
 
 /// Represents the structure of a .hk file.
 /// Sections are top-level keys in the outer IndexMap to preserve order.
@@ -47,10 +29,6 @@ pub enum HkValue {
 }
 
 impl HkValue {
-    /// Returns the value as a String.
-    /// 
-    /// FIX: Automatically converts Numbers and Bools to their string representation
-    /// instead of returning a TypeMismatch error. This handles cases like 'version => 0.2'.
     pub fn as_string(&self) -> Result<String, HkError> {
         match self {
             Self::String(s) => Ok(s.clone()),
@@ -125,65 +103,353 @@ pub enum HkError {
     MissingField(String),
     #[error("Invalid reference: {0}")]
     InvalidReference(String),
+    #[error("Cyclic reference detected: {0}")]
+    CyclicReference(String),
+    #[error("Key conflict: {0}")]
+    KeyConflict(String),
+}
+
+impl HkError {
+    pub fn pretty_print(&self, source: &str) {
+        match self {
+            Self::Parse { line, column, message } => {
+                eprintln!("{} {}", "error:".red().bold(), "parse error".red().bold());
+                eprintln!("  {} at {}:{}", "→".red(), line, column);
+                if let Some(line_content) = source.lines().nth((*line - 1) as usize) {
+                    eprintln!("\n  {}", line_content);
+                    eprintln!("  {}{}", " ".repeat(*column), "^".red().bold());
+                    eprintln!("  {}", message.red());
+                } else {
+                    eprintln!("  {}", message.red());
+                }
+
+                if message.contains("tag \"=>\"") {
+                    eprintln!("\n{} {}", "Hint:".yellow().bold(), "Try: key => value".cyan());
+                } else if message.contains("tag \"[\"") {
+                    eprintln!("\n{} {}", "Hint:".yellow().bold(), "Sections must start with [name]".cyan());
+                } else if message.contains("take_while1") {
+                    eprintln!("\n{} {}", "Hint:".yellow().bold(), "Keys can only contain letters, digits, '_', '-', '.'".cyan());
+                }
+            }
+            Self::TypeMismatch { expected, found } => {
+                eprintln!("{} {}", "error:".red().bold(), "type mismatch".red().bold());
+                eprintln!("  expected {}, got {}", expected.cyan(), found.red());
+            }
+            Self::InvalidReference(ref_var) => {
+                eprintln!("{} {}", "error:".red().bold(), "invalid reference".red().bold());
+                eprintln!("  {}", ref_var.red());
+                eprintln!("\n{} {}", "Hint:".yellow().bold(), "Check if the referenced key exists and is accessible".cyan());
+            }
+            Self::CyclicReference(path) => {
+                eprintln!("{} {}", "error:".red().bold(), "cyclic reference".red().bold());
+                eprintln!("  {}", path.red());
+            }
+            Self::KeyConflict(key) => {
+                eprintln!("{} {}", "error:".red().bold(), "key conflict".red().bold());
+                eprintln!("  Duplicate key '{}' in nested structure", key.red());
+            }
+            _ => eprintln!("{}", self.to_string().red()),
+        }
+    }
 }
 
 /// Parses a .hk file from a string input.
 pub fn parse_hk(input: &str) -> Result<HkConfig, HkError> {
-    let input_span = LocatedSpan::new(input);
-    let mut remaining = input_span;
+    let lines: Vec<&str> = input.lines().collect();
     let mut config = IndexMap::new();
+    let mut i = 0;
 
-    while !remaining.fragment().is_empty() {
-        // Czyszczenie białych znaków i komentarzy przed parsowaniem sekcji
-        let (rest, _) = many0(alt((
-            multispace1,
-            map(comment, |_| Span::new("")) 
-        )))(remaining).map_err(|e| map_nom_error(input, remaining, e))?;
-        
-        remaining = rest;
-        if remaining.fragment().is_empty() { break; }
+    while i < lines.len() {
+        let line = lines[i].trim_start();
+        if line.is_empty() || line.starts_with('!') {
+            i += 1;
+            continue;
+        }
 
-        let (rest, (name, values)) = section(remaining).map_err(|e| map_nom_error(input, remaining, e))?;
-        config.insert(name, HkValue::Map(values));
-        remaining = rest;
+        if line.starts_with('[') {
+            let close = line.find(']').ok_or_else(|| HkError::Parse {
+                line: (i + 1) as u32,
+                column: line.find('[').unwrap() + 1,
+                message: "Unclosed section header".to_string(),
+            })?;
+            let section_name = line[1..close].trim();
+            if section_name.is_empty() {
+                return Err(HkError::Parse {
+                    line: (i + 1) as u32,
+                    column: close + 1,
+                    message: "Empty section name".to_string(),
+                });
+            }
+
+            // Find the end of this section (next section or EOF)
+            let mut end = i + 1;
+            while end < lines.len() {
+                let next_line = lines[end].trim_start();
+                if next_line.starts_with('[') {
+                    break;
+                }
+                end += 1;
+            }
+
+            let section_lines = &lines[i + 1..end];
+            let map = parse_map(1, section_lines, i + 1)?;
+            config.insert(section_name.to_string(), HkValue::Map(map));
+            i = end;
+        } else {
+            return Err(HkError::Parse {
+                line: (i + 1) as u32,
+                column: 1,
+                message: "Expected section header".to_string(),
+            });
+        }
     }
 
     Ok(config)
 }
 
-/// Helper to map nom error to HkError.
-fn map_nom_error(input: &str, span: Span, err: nom::Err<VerboseError<Span>>) -> HkError {
-    let verbose_err = match err {
-        nom::Err::Error(e) | nom::Err::Failure(e) => e,
-        nom::Err::Incomplete(_) => VerboseError { errors: vec![] },
-    };
-   
-    let (line, column) = if let Some((s, _)) = verbose_err.errors.first() {
-        (s.location_line(), s.get_column())
-    } else {
-        (span.location_line(), span.get_column())
-    };
+/// Parse a map from a slice of lines, starting with a given indentation level (number of dashes).
+/// level: the number of dashes expected for the current depth (e.g., 1 for "->", 2 for "-->")
+/// Returns the map and the index of the next line to process.
+fn parse_map(level: usize, lines: &[&str], start_line: usize) -> Result<IndexMap<String, HkValue>, HkError> {
+    let mut map = IndexMap::new();
+    let mut i = 0;
 
-    let errors_str: Vec<(&str, VerboseErrorKind)> = verbose_err
-        .errors
-        .iter()
-        .map(|(s, k)| (*s.fragment(), k.clone()))
-        .collect();
-    let verbose_err_str = VerboseError { errors: errors_str };
-    let mut message = nom::error::convert_error(input, verbose_err_str);
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('!') {
+            i += 1;
+            continue;
+        }
 
-    if message.contains("tag \"=>\"") {
-        message.push_str("\nHint: Upewnij się, że po kluczu znajduje się '=>' przed wartością.");
-    } else if message.contains("tag \"[\"") {
-        message.push_str("\nHint: Sprawdź, czy sekcje zaczynają się od '[' i kończą ']'.");
-    } else if message.contains("take_while1") {
-        message.push_str("\nHint: Klucze mogą zawierać tylko litery, cyfry, '_', '-' i '.'.");
+        // Count leading dashes
+        let dash_count = trimmed.chars().take_while(|c| *c == '-').count();
+        if dash_count == 0 {
+            return Err(HkError::Parse {
+                line: (start_line + i) as u32,
+                column: 1,
+                message: "Expected key or map header".to_string(),
+            });
+        }
+        if dash_count != level {
+            // Different level – return to caller
+            break;
+        }
+
+        // After dashes, skip any spaces, expect '>', then skip spaces
+        let after_dashes = &trimmed[dash_count..];
+        let rest = after_dashes.trim_start();
+        if !rest.starts_with('>') {
+            return Err(HkError::Parse {
+                line: (start_line + i) as u32,
+                column: dash_count + 1,
+                message: "Expected '>' after dashes".to_string(),
+            });
+        }
+        let after_gt = &rest[1..].trim_start();
+        if after_gt.is_empty() {
+            return Err(HkError::Parse {
+                line: (start_line + i) as u32,
+                column: dash_count + 1,
+                message: "Missing key after '>'".to_string(),
+            });
+        }
+
+        // Check if it's a key-value line (contains "=>")
+        if let Some(arrow_pos) = after_gt.find("=>") {
+            let key = after_gt[..arrow_pos].trim();
+            let value_part = after_gt[arrow_pos + 2..].trim();
+            let key = unquote_key(key);
+            if key.is_empty() {
+                return Err(HkError::Parse {
+                    line: (start_line + i) as u32,
+                    column: dash_count + 1,
+                    message: "Empty key".to_string(),
+                });
+            }
+            let value = parse_value(value_part, start_line + i, arrow_pos + dash_count + 2)?;
+            insert_key(&mut map, &key, value)?;
+            i += 1;
+        } else {
+            // It's a map header: "- > key" without "=>"
+            let key = after_gt.trim();
+            let key = unquote_key(key);
+            if key.is_empty() {
+                return Err(HkError::Parse {
+                    line: (start_line + i) as u32,
+                    column: dash_count + 1,
+                    message: "Empty map key".to_string(),
+                });
+            }
+
+            // Find the sub-lines that belong to this map (higher level)
+            let next_level = level + 1;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let sub_line = lines[j];
+                let sub_trimmed = sub_line.trim_start();
+                if sub_trimmed.is_empty() || sub_trimmed.starts_with('!') {
+                    j += 1;
+                    continue;
+                }
+                let sub_dash_count = sub_trimmed.chars().take_while(|c| *c == '-').count();
+                if sub_dash_count < next_level {
+                    break;
+                }
+                j += 1;
+            }
+
+            let sub_lines = &lines[i + 1..j];
+            let sub_map = parse_map(next_level, sub_lines, start_line + i + 1)?;
+            insert_key(&mut map, &key, HkValue::Map(sub_map))?;
+            i = j;
+        }
     }
 
-    HkError::Parse {
-        line,
-        column,
-        message,
+    Ok(map)
+}
+
+/// Insert a key (which may contain dots for nesting) into the map.
+/// Keys that start or end with a dot are treated as literal keys (no nesting).
+fn insert_key(map: &mut IndexMap<String, HkValue>, key: &str, value: HkValue) -> Result<(), HkError> {
+    // If the key contains dots but not at the start or end, split and nest.
+    if key.contains('.') && !key.starts_with('.') && !key.ends_with('.') {
+        let parts: Vec<&str> = key.split('.').collect();
+        insert_nested(map, parts, value)
+    } else {
+        // Otherwise, treat as a single key.
+        if map.contains_key(key) {
+            return Err(HkError::KeyConflict(key.to_string()));
+        }
+        map.insert(key.to_string(), value);
+        Ok(())
+    }
+}
+
+/// Insert a nested key using the split parts.
+fn insert_nested(map: &mut IndexMap<String, HkValue>, keys: Vec<&str>, value: HkValue) -> Result<(), HkError> {
+    let mut current = map;
+    for key in &keys[0..keys.len() - 1] {
+        let entry = current
+            .entry(key.to_string())
+            .or_insert(HkValue::Map(IndexMap::new()));
+        if let HkValue::Map(submap) = entry {
+            current = submap;
+        } else {
+            return Err(HkError::KeyConflict(key.to_string()));
+        }
+    }
+    if let Some(last_key) = keys.last() {
+        current.insert(last_key.to_string(), value);
+    }
+    Ok(())
+}
+
+/// Remove surrounding quotes from a key (if present) and unescape inner quotes.
+fn unquote_key(s: &str) -> String {
+    let s = s.trim();
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        let inner = &s[1..s.len() - 1];
+        inner.replace("\\\"", "\"")
+    } else {
+        s.to_string()
+    }
+}
+
+fn parse_value(s: &str, line: usize, column: usize) -> Result<HkValue, HkError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(HkError::Parse {
+            line: line as u32,
+            column,
+            message: "Empty value".to_string(),
+        });
+    }
+
+    // Array
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len() - 1];
+        let mut items = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut escape = false;
+        for c in inner.chars() {
+            if escape {
+                current.push(c);
+                escape = false;
+                continue;
+            }
+            match c {
+                '\\' => escape = true,
+                '"' => in_quotes = !in_quotes,
+                ',' if !in_quotes => {
+                    if !current.trim().is_empty() {
+                        let item = parse_simple_value(current.trim(), line, column)?;
+                        items.push(item);
+                        current.clear();
+                    }
+                }
+                _ => current.push(c),
+            }
+        }
+        if !current.trim().is_empty() {
+            let item = parse_simple_value(current.trim(), line, column)?;
+            items.push(item);
+        }
+        Ok(HkValue::Array(items))
+    } else {
+        parse_simple_value(s, line, column)
+    }
+}
+
+fn parse_simple_value(s: &str, line: usize, column: usize) -> Result<HkValue, HkError> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(HkError::Parse {
+            line: line as u32,
+            column,
+            message: "Empty value".to_string(),
+        });
+    }
+
+    // Boolean
+    if s.eq_ignore_ascii_case("true") {
+        return Ok(HkValue::Bool(true));
+    }
+    if s.eq_ignore_ascii_case("false") {
+        return Ok(HkValue::Bool(false));
+    }
+
+    // Number
+    if let Ok(n) = f64::from_str(s) {
+        return Ok(HkValue::Number(n));
+    }
+
+    // Quoted string
+    if s.starts_with('"') && s.ends_with('"') {
+        let inner = &s[1..s.len() - 1];
+        let mut result = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(next) = chars.next() {
+                    match next {
+                        'n' => result.push('\n'),
+                        'r' => result.push('\r'),
+                        't' => result.push('\t'),
+                        '"' => result.push('"'),
+                        '\\' => result.push('\\'),
+                        _ => result.push(next),
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        Ok(HkValue::String(result))
+    } else {
+        // Plain string
+        Ok(HkValue::String(s.to_string()))
     }
 }
 
@@ -203,23 +469,43 @@ pub fn load_hk_file<P: AsRef<Path>>(path: P) -> Result<HkConfig, HkError> {
 /// Resolves interpolations in the config, including env vars and references.
 pub fn resolve_interpolations(config: &mut HkConfig) -> Result<(), HkError> {
     let context = config.clone();
-   
-    for (_, value) in config.iter_mut() {
+    let mut resolved = HashSet::new();
+    let mut resolving = Vec::new();
+    for (section, value) in config.iter_mut() {
         if let HkValue::Map(map) = value {
-            resolve_map(map, &context)?;
+            resolve_map(map, &context, &mut resolved, &mut resolving, &format!("{}", section))?;
         }
     }
     Ok(())
 }
 
-fn resolve_map(map: &mut IndexMap<String, HkValue>, top: &HkConfig) -> Result<(), HkError> {
-    for (_, v) in map.iter_mut() {
-        resolve_value(v, top)?;
+fn resolve_map(
+    map: &mut IndexMap<String, HkValue>,
+    top: &HkConfig,
+    resolved: &mut HashSet<String>,
+    resolving: &mut Vec<String>,
+    path: &str,
+) -> Result<(), HkError> {
+    for (key, v) in map.iter_mut() {
+        let new_path = format!("{}.{}", path, key);
+        if resolved.contains(&new_path) {
+            continue;
+        }
+        resolving.push(new_path.clone());
+        resolve_value(v, top, resolved, resolving, &new_path)?;
+        resolving.pop();
+        resolved.insert(new_path);
     }
     Ok(())
 }
 
-fn resolve_value(v: &mut HkValue, top: &HkConfig) -> Result<(), HkError> {
+fn resolve_value(
+    v: &mut HkValue,
+    top: &HkConfig,
+    resolved: &mut HashSet<String>,
+    resolving: &mut Vec<String>,
+    path: &str,
+) -> Result<(), HkError> {
     match v {
         HkValue::String(s) => {
             let mut new_s = String::new();
@@ -231,7 +517,11 @@ fn resolve_value(v: &mut HkValue, top: &HkConfig) -> Result<(), HkError> {
                 let repl = if var.starts_with("env:") {
                     env::var(&var[4..]).unwrap_or_default()
                 } else {
-                    resolve_path(var, top).ok_or(HkError::InvalidReference(var.to_string()))?
+                    // Resolve the reference recursively, detecting cycles
+                    if resolving.contains(&var.to_string()) {
+                        return Err(HkError::CyclicReference(var.to_string()));
+                    }
+                    resolve_reference(var, top, resolved, resolving)?
                 };
                 new_s.push_str(&repl);
                 last = m.end();
@@ -240,23 +530,94 @@ fn resolve_value(v: &mut HkValue, top: &HkConfig) -> Result<(), HkError> {
             *s = new_s;
         }
         HkValue::Array(a) => {
-            for item in a.iter_mut() {
-                resolve_value(item, top)?;
+            for (i, item) in a.iter_mut().enumerate() {
+                resolve_value(item, top, resolved, resolving, &format!("{}[{}]", path, i))?;
             }
         }
-        HkValue::Map(m) => resolve_map(m, top)?,
+        HkValue::Map(m) => {
+            resolve_map(m, top, resolved, resolving, path)?;
+        }
         _ => {}
     }
     Ok(())
 }
 
-fn resolve_path(path: &str, config: &HkConfig) -> Option<String> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current: Option<&HkValue> = config.get(parts[0]);
-    for &p in &parts[1..] {
-        current = current.and_then(|v| v.as_map().ok()).and_then(|m| m.get(p));
+fn resolve_reference(
+    path: &str,
+    top: &HkConfig,
+    resolved: &mut HashSet<String>,
+    resolving: &mut Vec<String>,
+) -> Result<String, HkError> {
+    // Check if the reference is already in the resolving stack (cycle)
+    if resolving.contains(&path.to_string()) {
+        return Err(HkError::CyclicReference(path.to_string()));
     }
-    current.and_then(|v| v.as_string().ok())
+
+    // Get the raw value from the config
+    let raw_value = get_value_by_path(path, top).ok_or_else(|| HkError::InvalidReference(path.to_string()))?;
+    // Clone the value so we can resolve it without affecting the original
+    let mut cloned_value = raw_value.clone();
+
+    // Push the path onto the resolving stack
+    resolving.push(path.to_string());
+
+    // Resolve the cloned value recursively
+    resolve_value(&mut cloned_value, top, resolved, resolving, path)?;
+
+    // Pop the path from the stack
+    resolving.pop();
+
+    // Convert the resolved value to a string
+    cloned_value.as_string()
+}
+
+fn get_value_by_path<'a>(path: &str, config: &'a HkConfig) -> Option<&'a HkValue> {
+    let bracket_re = Regex::new(r"([^\[\].]+)(?:\[(\d+)\])?").unwrap();
+    let mut parts = Vec::new();
+    for cap in bracket_re.captures_iter(path) {
+        let key = cap.get(1).map(|m| m.as_str()).unwrap();
+        let idx = cap.get(2).map(|m| m.as_str().parse::<usize>().ok());
+        parts.push((key, idx.flatten()));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let (first_key, _) = parts[0];
+    let mut current_value: Option<&'a HkValue> = config.get(first_key);
+    for (key, idx) in parts.iter().skip(1) {
+        match current_value {
+            Some(HkValue::Map(map)) => {
+                current_value = map.get(*key);
+            }
+            Some(HkValue::Array(arr)) if idx.is_some() => {
+                if let Some(i) = idx {
+                    if *i < arr.len() {
+                        current_value = Some(&arr[*i]);
+                        continue;
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        if let Some(idx) = idx {
+            if let Some(HkValue::Array(arr)) = current_value {
+                if *idx < arr.len() {
+                    current_value = Some(&arr[*idx]);
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+    current_value
 }
 
 /// Serializes a HkConfig back to a .hk string, preserving key order.
@@ -265,23 +626,24 @@ pub fn serialize_hk(config: &HkConfig) -> String {
     for (section, value) in config.iter() {
         output.push_str(&format!("[{}]\n", section));
         if let HkValue::Map(map) = value {
-            serialize_map(map, 0, &mut output);
+            serialize_map(map, 1, &mut output);
         }
         output.push('\n');
     }
     output.trim_end().to_string()
 }
 
-fn serialize_map(map: &IndexMap<String, HkValue>, indent: usize, output: &mut String) {
-    let spaces = " ".repeat(indent);
+fn serialize_map(map: &IndexMap<String, HkValue>, level: usize, output: &mut String) {
+    let prefix = "-".repeat(level) + " > ";
     for (key, value) in map.iter() {
         match value {
             HkValue::Map(submap) => {
-                output.push_str(&format!("{}-> {}\n", spaces, key));
-                serialize_map(submap, indent + 1, output);
+                output.push_str(&format!("{}{}\n", prefix, key));
+                serialize_map(submap, level + 1, output);
             }
             _ => {
-                output.push_str(&format!("{}-> {} => {}\n", spaces, key, serialize_value(value)));
+                let val = serialize_value(value);
+                output.push_str(&format!("{}{} => {}\n", prefix, key, val));
             }
         }
     }
@@ -290,7 +652,7 @@ fn serialize_map(map: &IndexMap<String, HkValue>, indent: usize, output: &mut St
 fn serialize_value(value: &HkValue) -> String {
     match value {
         HkValue::String(s) => {
-            if s.contains(',') || s.contains(' ') || s.contains(']') || s.contains('"') {
+            if s.contains(',') || s.contains(' ') || s.contains(']') || s.contains('"') || s.contains('\n') {
                 format!("\"{}\"", s.replace("\"", "\\\""))
             } else {
                 s.clone()
@@ -305,231 +667,13 @@ fn serialize_value(value: &HkValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        HkValue::Map(_) => "<map>".to_string(), 
+        HkValue::Map(_) => "<map>".to_string(),
     }
 }
 
 pub fn write_hk_file<P: AsRef<Path>>(path: P, config: &HkConfig) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(serialize_hk(config).as_bytes())
-}
-
-// --- Parser Combinators ---
-
-// Helper to define allowed characters in keys: alphanumeric, _, -, .
-fn is_key_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
-}
-
-fn comment(input: Span) -> ParseResult<Span> {
-    context(
-        "comment",
-        delimited(tag("!"), take_while(|c| c != '\r' && c != '\n'), opt(tag("\n"))),
-    )(input)
-}
-
-fn section(input: Span) -> ParseResult<(String, IndexMap<String, HkValue>)> {
-    context(
-        "section",
-        map(
-            tuple((
-                delimited(tag("["), take_until("]"), tag("]")),
-                multispace0,
-                terminated(
-                    many0(alt((
-                        map(comment, |_| None),
-                        map(key_value, Some),
-                        map(nested_key_value, Some),
-                    ))),
-                    // Using multispace0 ensures we consume trailing newlines before EOF or next section
-                    tuple((multispace0, peek(alt((tag("["), map(eof, |_| Span::new(""))))))),
-                ),
-            )),
-            |(name, _, opt_pairs)| {
-                let mut map = IndexMap::new();
-                for pair_opt in opt_pairs {
-                    if let Some((key, value)) = pair_opt {
-                        insert_nested(&mut map, key.split('.').collect::<Vec<_>>(), value);
-                    }
-                }
-                (name.fragment().trim().to_string(), map)
-            },
-        ),
-    )(input)
-}
-
-fn insert_nested(map: &mut IndexMap<String, HkValue>, keys: Vec<&str>, value: HkValue) {
-    let mut current = map;
-    for key in &keys[0..keys.len() - 1] {
-        let entry = current
-            .entry(key.to_string())
-            .or_insert(HkValue::Map(IndexMap::new()));
-        if let HkValue::Map(submap) = entry {
-            current = submap;
-        } else {
-            // In a robust system, this might return an error rather than panic
-            panic!("Invalid nesting: key conflict"); 
-        }
-    }
-    if let Some(last_key) = keys.last() {
-        current.insert(last_key.to_string(), value);
-    }
-}
-
-fn key_value(input: Span) -> ParseResult<(String, HkValue)> {
-    context(
-        "key_value",
-        map(
-            tuple((
-                preceded(
-                    tuple((multispace0, tag("->"), multispace1)),
-                    take_while1(is_key_char),
-                ),
-                multispace0,
-                tag("=>"),
-                line_value,
-            )),
-            |(key, _, _, value)| (key.fragment().trim().to_string(), value),
-        ),
-    )(input)
-}
-
-fn nested_key_value(input: Span) -> ParseResult<(String, HkValue)> {
-    context(
-        "nested_key_value",
-        map(
-            tuple((
-                preceded(
-                    // multispace0 here allows for "compressed" lists or standard spacing
-                    tuple((multispace0, tag("->"), multispace1)),
-                    take_while1(is_key_char),
-                ),
-                many1(sub_key_value),
-            )),
-            |(key, sub_pairs)| {
-                let mut sub_map = IndexMap::new();
-                for (sub_key, sub_value) in sub_pairs {
-                    sub_map.insert(sub_key, sub_value);
-                }
-                (key.fragment().trim().to_string(), HkValue::Map(sub_map))
-            },
-        ),
-    )(input)
-}
-
-fn sub_key_value(input: Span) -> ParseResult<(String, HkValue)> {
-    context(
-        "sub_key_value",
-        map(
-            tuple((
-                preceded(
-                    // FIX: Changed multispace1 to multispace0. 
-                    // line_value consumes the newline. If there is no indentation, 
-                    // multispace1 fails because there is no whitespace left.
-                    tuple((multispace0, tag("-->"), multispace1)),
-                    take_while1(is_key_char),
-                ),
-                multispace0,
-                tag("=>"),
-                line_value,
-            )),
-            |(sub_key, _, _, sub_value)| (sub_key.fragment().trim().to_string(), sub_value),
-        ),
-    )(input)
-}
-
-fn line_value(input: Span) -> ParseResult<HkValue> {
-    preceded(
-        multispace0,
-        alt((
-            map(array, HkValue::Array),
-            map(
-                // Consumes until newline, and optionally consumes the newline itself
-                terminated(
-                    take_while(|c| c != '\r' && c != '\n'), 
-                    opt(tag("\n"))
-                ),
-                |s: Span| parse_simple(s.fragment()),
-            ),
-        )),
-    )(input)
-}
-
-fn parse_simple(s: &str) -> HkValue {
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("true") {
-        HkValue::Bool(true)
-    } else if s.eq_ignore_ascii_case("false") {
-        HkValue::Bool(false)
-    } else if let Ok(n) = f64::from_str(s) {
-        HkValue::Number(n)
-    } else {
-        HkValue::String(s.to_string())
-    }
-}
-
-fn array(input: Span) -> ParseResult<Vec<HkValue>> {
-    delimited(
-        tag("["),
-        separated_list0(tuple((multispace0, tag(","), multispace0)), item_value),
-        tag("]"),
-    )(input)
-    .map(|(i, v)| (i, v))
-}
-
-fn item_value(input: Span) -> ParseResult<HkValue> {
-    alt((
-        map(array, HkValue::Array),
-        map(double_quoted, |s| HkValue::String(s.fragment().to_string())),
-        map(
-            take_while1(|c: char| !c.is_whitespace() && c != ',' && c != ']'),
-            |s: Span| parse_simple(s.fragment()),
-        ),
-    ))(input)
-}
-
-fn double_quoted(input: Span) -> ParseResult<Span> {
-    delimited(tag("\""), take_while(|c| c != '"'), tag("\""))(input)
-}
-
-// --- Type Conversion Traits ---
-
-pub trait FromHkValue: Sized {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError>;
-}
-
-impl FromHkValue for String {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError> {
-        value.as_string()
-    }
-}
-
-impl FromHkValue for f64 {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError> {
-        value.as_number()
-    }
-}
-
-impl FromHkValue for bool {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError> {
-        value.as_bool()
-    }
-}
-
-impl<T: FromHkValue> FromHkValue for Vec<T> {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError> {
-        value
-            .as_array()?
-            .iter()
-            .map(|v| T::from_hk_value(v))
-            .collect()
-    }
-}
-
-impl<T: FromHkValue> FromHkValue for Option<T> {
-    fn from_hk_value(value: &HkValue) -> Result<Self, HkError> {
-        Ok(Some(T::from_hk_value(value)?))
-    }
 }
 
 #[cfg(test)]
@@ -555,31 +699,22 @@ mod tests {
 --> description => Twórz ładne interfejsy cli
 "#;
         let result = parse_hk(input).expect("Failed to parse libraries file");
-        
-        if let Some(HkValue::Map(libraries)) = result.get("libraries") {
-            // Check obsidian
-            if let Some(HkValue::Map(obsidian)) = libraries.get("obsidian") {
-                // Internal representation is Number
-                assert_eq!(obsidian.get("version"), Some(&HkValue::Number(0.2)));
-                // But as_string() should convert it gracefully now
-                assert_eq!(obsidian.get("version").unwrap().as_string().unwrap(), "0.2");
-                
-                assert_eq!(obsidian.get("description").unwrap().as_string().unwrap(), "Biblioteka inspirowana zenity.");
-                assert!(obsidian.contains_key("so-download"));
-                assert!(obsidian.contains_key(".hl-download"));
-            } else {
-                panic!("Missing obsidian key");
-            }
+        assert!(result.contains_key("libraries"));
+        let libraries = result["libraries"].as_map().unwrap();
+        assert!(libraries.contains_key("obsidian"));
+        let obsidian = libraries["obsidian"].as_map().unwrap();
+        assert_eq!(obsidian["version"].as_number().unwrap(), 0.2);
+        assert_eq!(obsidian["description"].as_string().unwrap(), "Biblioteka inspirowana zenity.");
+        assert!(obsidian.contains_key("so-download"));
+        assert!(obsidian.contains_key(".hl-download"));
+        assert_eq!(
+            obsidian[".hl-download"].as_string().unwrap(),
+            "https://github.com/Bytes-Repository/obsidian-lib/blob/main/obsidian.hl"
+        );
 
-            // Check yuy
-             if let Some(HkValue::Map(yuy)) = libraries.get("yuy") {
-                assert_eq!(yuy.get("version"), Some(&HkValue::Number(0.2)));
-            } else {
-                panic!("Missing yuy key");
-            }
-        } else {
-            panic!("Missing libraries section");
-        }
+        assert!(libraries.contains_key("yuy"));
+        let yuy = libraries["yuy"].as_map().unwrap();
+        assert_eq!(yuy["version"].as_number().unwrap(), 0.2);
     }
 
     #[test]
@@ -593,5 +728,108 @@ mod tests {
         "#;
         let result = parse_hk(input).unwrap();
         assert!(result.contains_key("metadata"));
+        let metadata = result["metadata"].as_map().unwrap();
+        assert_eq!(metadata["name"].as_string().unwrap(), "Hacker Lang");
+        assert_eq!(metadata["version"].as_number().unwrap(), 1.5);
+        let list = metadata["list"].as_array().unwrap();
+        assert_eq!(list.len(), 4);
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Empty section
+        let input = "[empty]\n";
+        let config = parse_hk(input).unwrap();
+        assert!(config.contains_key("empty"));
+        assert_eq!(config["empty"].as_map().unwrap().len(), 0);
+
+        // Section with only comments
+        let input = "[comments]\n! comment\n! another\n";
+        let config = parse_hk(input).unwrap();
+        assert!(config.contains_key("comments"));
+        assert_eq!(config["comments"].as_map().unwrap().len(), 0);
+
+        // Nested map with dots in keys
+        let input = r#"
+[config]
+-> a.b.c => 42
+"#;
+        let config = parse_hk(input).unwrap();
+        let a = config["config"].as_map().unwrap().get("a").unwrap().as_map().unwrap();
+        let b = a.get("b").unwrap().as_map().unwrap();
+        let c = b.get("c").unwrap().as_number().unwrap();
+        assert_eq!(c, 42.0);
+    }
+
+    #[test]
+    fn test_array_reference() {
+        let input = r#"
+[data]
+-> numbers => [10, 20, 30]
+-> first => ${data.numbers[0]}
+"#;
+        let mut config = parse_hk(input).unwrap();
+        resolve_interpolations(&mut config).unwrap();
+        let first = config["data"].as_map().unwrap()["first"].as_string().unwrap();
+        assert_eq!(first, "10");
+    }
+
+    #[test]
+    fn test_cyclic_reference_detection() {
+        let input = r#"
+[a]
+-> b => ${a.c}
+-> c => ${a.b}
+"#;
+        let mut config = parse_hk(input).unwrap();
+        let err = resolve_interpolations(&mut config).unwrap_err();
+        match err {
+            HkError::CyclicReference(path) => {
+                assert!(path.contains("a.b") || path.contains("a.c"));
+            }
+            _ => panic!("Expected cyclic reference error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_key_conflict() {
+        let input = r#"
+[conflict]
+-> a => 1
+-> a.b => 2
+"#;
+        let result = parse_hk(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_reference() {
+        let input = r#"
+[a]
+-> b => ${a.missing}
+"#;
+        let mut config = parse_hk(input).unwrap();
+        let err = resolve_interpolations(&mut config).unwrap_err();
+        match err {
+            HkError::InvalidReference(var) => {
+                assert_eq!(var, "a.missing");
+            }
+            _ => panic!("Expected invalid reference error"),
+        }
+    }
+
+    #[test]
+    fn test_serialize_roundtrip() {
+        let input = r#"
+[test]
+-> key => value
+-> array => [1, "two", true]
+-> nested
+--> sub => 42
+"#;
+        let config = parse_hk(input).unwrap();
+        let serialized = serialize_hk(&config);
+        let parsed_again = parse_hk(&serialized).unwrap();
+        assert_eq!(config, parsed_again);
     }
 }
