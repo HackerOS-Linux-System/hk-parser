@@ -1,0 +1,101 @@
+! ==================================================
+!  PRZYKŁADOWY PLIK KONFIGURACYJNY .hk
+!  Pokazuje wszystkie możliwości parsera
+! ==================================================
+
+! 1. SEKCJE GŁÓWNE
+[global]
+-> name => "Hacker Lang Parser Demo"
+-> version => 2.0
+-> production => true
+-> tags => ["rust", "parser", "hk-format"]
+
+! Komentarz w środku sekcji
+! Zagnieżdżone klucze
+-> database
+--> host => localhost
+--> port => 5432
+--> credentials
+---> username => admin
+---> password => ${env:DB_PASSWORD}
+--> ssl => true
+
+-> features
+--> compression => true
+--> logging
+----> level => debug
+----> file => /var/log/app.log
+
+! 2. TABLICE
+[arrays]
+-> numbers => [1, 2, 3, 4, 5]
+-> mixed => [42, "text", true, 3.14, ["nested", "array"]]
+-> quoted => ["hello, world", "quote\"escape", "  spaced  "]
+
+! 3. REFERENCJE (interpolacje)
+[references]
+-> from_global => ${global.name}
+-> db_port => ${global.database.port}
+-> env_var => ${env:HOME}
+-> first_number => ${arrays.numbers[0]}
+-> mixed_item => ${arrays.mixed[1]}
+-> nested_array_item => ${arrays.mixed[4][0]}
+
+! 4. ZŁOŻONE ZAGNIEŻDŻENIA Z KROPKAMI W KLUCZACH
+[deep]
+-> a.b.c => 42
+-> x.y.z => "nested value"
+-> array.of.objects
+---> [0].name => first
+---> [0].value => 100
+---> [1].name => second
+---> [1].value => 200
+
+! 5. TYPY WARTOŚCI
+[types]
+-> string => "Hello, world!"
+-> number => 3.14159
+-> bool => true
+-> array => [1, 2, 3]
+-> map => <map>   ! Mapy nie mogą być bezpośrednio wartościami, tylko poprzez zagnieżdżanie
+
+! 6. EDGE CASES
+[edge]
+-> key-with-hyphen => value
+-> key_with_underscore => value
+-> key.with.dots => works
+-> "quoted key" => "value"   ! klucze w cudzysłowie? nieobsługiwane, to tylko pokazanie
+-> spaced value => "this has spaces"   ! wymaga cudzysłowu
+-> special => !@#$%^&*()   ! ciąg bez spacji
+
+! 7. INTERPOLACJE TABLICOWE (dostęp przez indeks)
+[interpolations]
+-> first_num => ${arrays.numbers[0]}
+-> last_num => ${arrays.numbers[4]}
+-> mixed_str => ${arrays.mixed[1]}
+-> nested_0 => ${arrays.mixed[4][0]}
+
+! 8. CYKLICZNA REFERENCJA (celowo zakomentowana, bo spowoduje błąd)
+! [cyclic]
+! -> a => ${cyclic.b}
+! -> b => ${cyclic.a}
+
+! 9. KONFLIKT KLUCZA (celowo zakomentowany, bo spowoduje błąd)
+! [conflict]
+! -> key => value
+! -> key.sub => conflict   ! to spowoduje błąd, bo "key" jest już stringiem, a próba zagnieżdżenia
+
+! 10. ZMIENNE ŚRODOWISKOWE
+[env]
+-> user => ${env:USER}
+-> home => ${env:HOME}
+-> path => ${env:PATH}
+-> undefined => ${env:UNDEFINED_VAR}   ! zostanie puste
+
+! 11. PUSTA SEKCJA
+[empty]
+! brak kluczy
+
+! 12. KOMENTARZE W LINII
+[comments]
+-> key => value ! komentarz po wartości (nie jest obsługiwany, zostanie częścią wartości)
