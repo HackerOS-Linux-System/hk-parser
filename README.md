@@ -1,6 +1,6 @@
 # hk-parser
 
-A robust parser and serializer for Hacker Lang configuration files (.hk).
+A robust parser and serializer for HackerOS configuration files (.hk).
 
 [![Crates.io](https://img.shields.io/crates/v/hk-parser.svg)](https://crates.io/crates/hk-parser)
 [![Docs.rs](https://docs.rs/hk-parser/badge.svg)](https://docs.rs/hk-parser)
@@ -8,7 +8,7 @@ A robust parser and serializer for Hacker Lang configuration files (.hk).
 
 ## Overview
 
-`hk-parser` is a Rust crate designed to parse and serialize configuration files in the `.hk` format, which is used in Hacker Lang, the programming language for HackerOS. The `.hk` format is inspired by INI-like configurations but supports nested structures, comments, strong typing (strings, numbers, booleans, arrays, maps), interpolation (variables and references), and more advanced features like schema validation and derive macros for deserialization into Rust structs.
+`hk-parser` is a Rust crate designed to parse and serialize configuration files in the `.hk` format, which is used in HackerOS. The `.hk` format is inspired by INI-like configurations but supports nested structures, comments, strong typing (strings, numbers, booleans, arrays, maps), interpolation (variables and references), and more advanced features like schema validation and derive macros for deserialization into Rust structs.
 
 This crate aims to provide a professional, robust tool for handling configuration files with the following key features:
 - **Strong Typing**: Support for multiple data types beyond just strings.
@@ -53,7 +53,7 @@ Add `hk-parser` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hk-parser = "0.1.0"
+hk-parser = "0.3.1"
 ```
 
 If you need the derive macro, ensure your crate enables proc-macros (it's included by default).
@@ -81,7 +81,7 @@ Example `config.hk`:
 ```
 ! Example configuration
 [metadata]
--> name => Hacker Lang
+-> name => hk-config
 -> version => 1.5
 -> active => true
 -> pi => 3.14
@@ -111,17 +111,17 @@ Example with all features:
 ```
 ! Advanced example with types and nesting
 [metadata]
--> name => "Hacker Lang"
--> version => 1.5
+-> name => "HackerOS"
+-> version => 4.9
 -> is_active => true
 -> constants
 --> pi => 3.14159
 --> e => 2.718
--> authors => ["HackerOS Team", "Contributor1"]
+-> authors => ["HackerOS Team"]
 
 [dependencies]
--> rust => ">=1.92"
--> others => [ "odin >=2026", "crystal 1.19" ]
+-> H-Sharp => "0.8"
+-> others => ["Hacker Lang", "debian based", "Polish linux distro"]
 
 [path]
 -> home => ${HOME}
@@ -216,7 +216,7 @@ Currently, manual validation via accessors.
 
 ### Improved Parsing and Error Handling
 
-Uses `nom` with `nom_locate` for positioned errors: "Parse error at line X, column Y: message".
+Hand-written line/column tracking parser for positioned errors: "Parse error at line X, column Y: message".
 
 Supports trailing commas in arrays, multispace tolerance.
 
@@ -313,11 +313,6 @@ Contributions welcome! Fork the repo, create a branch, submit a PR.
 ## License
 
 MIT License. See [LICENSE](LICENSE).
-
-## Changelog
-
-- 0.1.0: Initial release with strong typing, interpolation, derive macro.
-- 0.0.1: Basic parser.
 
 ## FAQ
 
