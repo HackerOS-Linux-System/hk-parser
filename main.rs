@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use hk_parser::{load_hk_file, parse_hk, resolve_interpolations, HkError};
+use hk_parser::{parse_hk, resolve_interpolations};
 use std::fs;
 use std::path::PathBuf;
 
