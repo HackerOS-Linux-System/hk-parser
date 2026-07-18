@@ -129,6 +129,8 @@ impl HkError {
                     eprintln!("\n{} {}", "Hint:".yellow().bold(), "Sections must start with [name]".cyan());
                 } else if message.contains("take_while1") {
                     eprintln!("\n{} {}", "Hint:".yellow().bold(), "Keys can only contain letters, digits, '_', '-', '.'".cyan());
+                } else if message.contains("Inconsistent nesting level") {
+                    eprintln!("\n{} {}", "Hint:".yellow().bold(), "Each nesting level must add exactly one dash: '->', then '-->', then '--->', etc. Don't skip a level.".cyan());
                 }
             }
             Self::TypeMismatch { expected, found } => {
@@ -231,9 +233,28 @@ fn parse_map(level: usize, lines: &[&str], start_line: usize) -> Result<IndexMap
                 message: "Expected key or map header".to_string(),
             });
         }
-        if dash_count != level {
-            // Different level – return to caller
+        if dash_count < level {
+            // Shallower level – legitimately return control to the caller.
             break;
+        }
+        if dash_count > level {
+            // The line is MORE indented than expected at this depth. This means
+            // one or more nesting levels were skipped (e.g. jumping from "-->"
+            // straight to "---->" without a "--->" level in between). Previously
+            // this was silently treated the same as "end of this map", which made
+            // the parser drop the entire mismatched sub-tree without any warning.
+            // That is a data-loss bug, so we now report it as a proper parse error.
+            return Err(HkError::Parse {
+                line: (start_line + i) as u32,
+                column: 1,
+                message: format!(
+                    "Inconsistent nesting level: expected {} dash(es) (\"{}\") at this depth, found {} (\"{}\"). Nesting must increase by exactly one dash per level.",
+                    level,
+                    "-".repeat(level),
+                    dash_count,
+                    "-".repeat(dash_count)
+                ),
+            });
         }
 
         // After dashes, skip any spaces, expect '>', then skip spaces
@@ -652,7 +673,7 @@ fn serialize_map(map: &IndexMap<String, HkValue>, level: usize, output: &mut Str
 fn serialize_value(value: &HkValue) -> String {
     match value {
         HkValue::String(s) => {
-            if s.contains(',') || s.contains(' ') || s.contains(']') || s.contains('"') || s.contains('\n') {
+            if s.is_empty() || s.contains(',') || s.contains(' ') || s.contains(']') || s.contains('"') || s.contains('\n') {
                 format!("\"{}\"", s.replace("\"", "\\\""))
             } else {
                 s.clone()
@@ -829,6 +850,93 @@ mod tests {
 "#;
         let config = parse_hk(input).unwrap();
         let serialized = serialize_hk(&config);
+        let parsed_again = parse_hk(&serialized).unwrap();
+        assert_eq!(config, parsed_again);
+    }
+
+    #[test]
+    fn test_skipped_nesting_level_is_rejected() {
+        // Reproduces the exact "logging" bug: a level-2 map header ("-->")
+        // whose children jump straight to level 4 ("---->"), skipping level 3.
+        // Previously this silently produced an empty map instead of erroring.
+        let input = r#"
+[global]
+-> features
+--> logging
+----> level => debug
+----> file => /var/log/app.log
+"#;
+        let result = parse_hk(input);
+        assert!(result.is_err(), "Expected a parse error for skipped nesting level, got Ok");
+        match result.unwrap_err() {
+            HkError::Parse { message, .. } => {
+                assert!(message.contains("Inconsistent nesting level"), "unexpected message: {message}");
+            }
+            other => panic!("Expected HkError::Parse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_skipped_nesting_level_in_dotted_key_header_is_rejected() {
+        // Reproduces the "array.of.objects" bug: a level-1 dotted-key map header
+        // whose children jump straight to level 3 ("--->"), skipping level 2.
+        let input = r#"
+[deep]
+-> array.of.objects
+---> item => value
+"#;
+        let result = parse_hk(input);
+        assert!(result.is_err(), "Expected a parse error for skipped nesting level, got Ok");
+    }
+
+    #[test]
+    fn test_correct_incremental_nesting_still_works() {
+        // Sanity check: properly incremented nesting (one extra dash per level)
+        // must keep working exactly as before.
+        let input = r#"
+[global]
+-> features
+--> logging
+---> level => debug
+---> file => /var/log/app.log
+"#;
+        let config = parse_hk(input).unwrap();
+        let logging = config["global"]
+            .as_map().unwrap()["features"]
+            .as_map().unwrap()["logging"]
+            .as_map().unwrap();
+        assert_eq!(logging["level"].as_string().unwrap(), "debug");
+        assert_eq!(logging["file"].as_string().unwrap(), "/var/log/app.log");
+    }
+
+    #[test]
+    fn test_shallower_return_to_caller_still_works() {
+        // Sanity check: legitimately dedenting back to a shallower level
+        // (the normal "end of this nested map" case) must NOT error.
+        let input = r#"
+[a]
+-> x
+--> y => 1
+-> z => 2
+"#;
+        let config = parse_hk(input).unwrap();
+        let a = config["a"].as_map().unwrap();
+        assert_eq!(a["x"].as_map().unwrap()["y"].as_number().unwrap(), 1.0);
+        assert_eq!(a["z"].as_number().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn test_empty_string_roundtrip() {
+        // An empty string must serialize back to a quoted "" so it can be
+        // re-parsed, instead of silently disappearing.
+        let input = r#"
+[a]
+-> key => ""
+"#;
+        let config = parse_hk(input).unwrap();
+        assert_eq!(config["a"].as_map().unwrap()["key"].as_string().unwrap(), "");
+        let serialized = serialize_hk(&config);
+        assert!(serialized.contains("\"\""), "expected empty string to serialize as \"\", got: {serialized}");
         let parsed_again = parse_hk(&serialized).unwrap();
         assert_eq!(config, parsed_again);
     }
