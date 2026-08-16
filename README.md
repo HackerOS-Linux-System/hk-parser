@@ -53,7 +53,7 @@ Add `hk-parser` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hk-parser = "0.3.1"
+hk-parser = "3.2.1"
 ```
 
 If you need the derive macro, ensure your crate enables proc-macros (it's included by default).
@@ -145,7 +145,35 @@ Accessors like `value.as_string()`, `value.as_number()` return `Result` for type
 
 ### Arrays
 
-Arrays are parsed from `[item1, item2, ...]` syntax. Items can be mixed types, including nested arrays.
+Two syntax styles are supported, and both produce the exact same `HkValue::Array`:
+
+**Single-line** (comma-separated, classic style):
+
+```
+-> authors => ["Alice", "Bob"]
+-> numbers => [1, 2, 3]
+```
+
+**Multi-line** (one item per line, since v3.2 — handy for longer lists like
+tags, dependency lists, or filesystem paths, so you don't end up with a
+150-character line):
+
+```
+-> tags => [
+    "desktop"
+    "environment"
+    "gui"
+]
+```
+
+A trailing comma per line is accepted but not required — `"desktop",` and
+`"desktop"` on their own line both work, so you can freely reorder or
+copy-paste lines without worrying about commas. An array item can itself be
+another array (`[1, [2, 3], 4]`, on one line or spread across several) —
+nesting is tracked by bracket depth, so commas *inside* a nested array no
+longer split the *outer* array (fixed in v3.2; see [Changelog](#changelog)).
+
+Items can be mixed types, including nested arrays.
 
 Example parsing:
 
@@ -302,6 +330,31 @@ if let Err(HkError::Parse { line, column, message }) = parse_hk(invalid) {
 }
 ```
 
+### Nicer Error Output (since 3.2.1)
+
+For a rustc-style boxed snippet with a caret and a hint instead of a bare
+one-liner, use `render` (or `pretty_print`, which just prints `render`'s
+output to stderr):
+
+```rust
+match parse_hk(&contents) {
+    Ok(config) => { /* ... */ }
+    Err(e) => {
+        eprint!("{}", e.render(&contents)); // or: e.pretty_print(&contents);
+        std::process::exit(1);
+    }
+}
+```
+
+```text
+error: Expected key or map header
+  --> line 4, column 1
+  3 | -> ok => 1
+  4 | oops
+    | ^
+  hint: every non-blank, non-comment line must start with one or more '-' followed by '>', e.g. "-> key => value"
+```
+
 ## Contributing
 
 Contributions welcome! Fork the repo, create a branch, submit a PR.
@@ -310,9 +363,74 @@ Contributions welcome! Fork the repo, create a branch, submit a PR.
 - Build docs: `cargo doc --open`
 - Issues: Report bugs or feature requests on GitHub.
 
+Project layout (since 3.2.1 — previously one big `src/lib.rs`):
+
+| File               | Contents                                              |
+|--------------------|--------------------------------------------------------|
+| `src/value.rs`     | `HkValue`, `HkConfig`                                  |
+| `src/error.rs`     | `HkError`, `render`/`pretty_print`                      |
+| `src/parser.rs`    | `parse_hk`, `load_hk_file`, everything they call        |
+| `src/resolve.rs`   | `resolve_interpolations` (`${...}` interpolation)       |
+| `src/serialize.rs` | `serialize_hk`, `write_hk_file`                          |
+| `src/tests.rs`     | the test suite                                          |
+| `src/lib.rs`       | module declarations + the crate-root `pub use` re-exports |
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full history. Highlights of the
+latest release:
+
+### 3.2.1
+
+- **Fixed:** multi-line arrays whose items were themselves arrays (e.g.
+  `-> groups => [` / `    ["admins", "root"]` / `    ["users", "guest"]`
+  / `]`) failed with `Unclosed array`. The section-boundary scan in
+  `parse_hk` treated any `[`-led line as a brand new `[section]` header,
+  even one that was really just an array item nested inside a still-open
+  array value — so the section got cut off right after the opening `[`,
+  before `parse_map` ever saw the closing `]`. The scan is now
+  bracket-depth aware, matching the same logic already used for arrays
+  themselves.
+- **Improved:** error messages now render as a boxed, rustc-style
+  snippet — a line or two of surrounding source, a gutter with line
+  numbers, and a `^` caret under the exact column — via the new
+  `HkError::render(&self, source: &str) -> String` method.
+  `pretty_print` (unchanged signature) now just prints `render`'s
+  output to stderr. The caret is now positioned by character count
+  rather than byte count, so it no longer drifts on lines with
+  non-ASCII text before the error column. Hints were also rewired to
+  match the messages this parser actually produces (previous hints
+  matched leftover nom-parser-style fragments like `tag "=>"` that
+  never appeared in a real error).
+- **Internal:** `src/lib.rs` split into `value.rs`, `error.rs`,
+  `parser.rs`, `resolve.rs`, `serialize.rs`, and `tests.rs`. No public
+  API changes — everything is still re-exported at the crate root
+  exactly as before.
+
+### 3.2.0
+
+- **Added:** multi-line array syntax — `-> key => [` followed by one item
+  per line and a closing `]`, as an alternative to the single-line
+  `[a, b, c]` form. Trailing commas per line are optional.
+- **Fixed:** nested arrays on a single line (`[1, [2, 3], 4]`) were
+  previously split on *every* comma, including ones inside the nested
+  array, corrupting the result. Comma-splitting is now bracket-depth
+  aware.
+- **Fixed:** every `Parse` error's reported `line` was off by one (too
+  low) for anything inside a `[section]` — e.g. an error on the actual
+  10th line of the file was reported as line 9. Root cause: an
+  off-by-one in the line-number bookkeeping passed into the section's
+  map parser. Column numbers and errors at the top level (bad/missing
+  section headers) were unaffected.
+- Quoted-string array items now keep their quotes through the internal
+  tokenizer instead of losing them before the type-detection step, so
+  escape sequences (`\n`, `\t`, `\"`, ...) inside array items decode
+  correctly, matching how quoted strings already behaved outside
+  arrays.
 
 ## FAQ
 
