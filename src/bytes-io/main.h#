@@ -1,1 +1,129 @@
+extern dynamic [c, "hk_parser"] is
+    fn hk_parse(text: string) -> int
+    fn hk_parse_file(path: string) -> int
+    fn hk_resolve(handle: int) -> int
+    fn hk_free(handle: int)
+    fn hk_has(handle: int, key: string) -> int
+    fn hk_get_string(handle: int, key: string) -> string
+    fn hk_get_number(handle: int, key: string) -> f64
+    fn hk_get_bool(handle: int, key: string) -> int
+    fn hk_type_of(handle: int, key: string) -> string
+    fn hk_array_len(handle: int, key: string) -> int
+    fn hk_array_get_string(handle: int, key: string, index: int) -> string
+    fn hk_array_get_number(handle: int, key: string, index: int) -> f64
+    fn hk_serialize(handle: int) -> string
+    fn hk_last_error() -> string
+end
 
+use "std -> conv" from "conv"
+
+;; A parsed `.hk` document. Thin wrapper around the opaque handle
+;; `hk-parser` hands back — every real operation (parsing, dotted-path
+;; lookup, `${...}` resolution, serialization) happens on the Rust side.
+pub struct HkConfig is
+    pub _handle: int
+end
+
+;; Parse `.hk` source text already in memory.
+;; `cfg.is_valid()` is `false` on a parse error — check `last_error()`.
+pub fn parse(text: string) -> HkConfig is
+    return HkConfig { _handle: hk_parse(text) }
+end
+
+;; Parse a `.hk` file from disk. Same error convention as `parse`.
+pub fn parse_file(path: string) -> HkConfig is
+    return HkConfig { _handle: hk_parse_file(path) }
+end
+
+;; The last error message recorded on the native side ("" if none, or
+;; if it's already been superseded by a later, successful call).
+pub fn last_error() -> string is
+    return hk_last_error()
+end
+
+impl HkConfig is
+    ;; `false` after a failed `parse`/`parse_file`, or once `free`d.
+    fn is_valid(self) -> bool is
+        return self._handle != 0
+    end
+
+    ;; Expand `${env:VAR}` and `${section.key}` interpolations in
+    ;; place. Returns `true` on success; `false` on a cyclic or
+    ;; invalid reference (see `hk::last_error()`).
+    fn resolve(self) -> bool is
+        return hk_resolve(self._handle) == 1
+    end
+
+    ;; `true` if `key` — a dotted path, e.g. `"metadata.authors[0]"` —
+    ;; resolves to something.
+    fn has(self, key: string) -> bool is
+        return hk_has(self._handle, key) == 1
+    end
+
+    ;; Value at `key` as a string. `""` if absent or it's an
+    ;; array/map (use `array`/`array_get` for those).
+    fn get(self, key: string) -> string is
+        return hk_get_string(self._handle, key)
+    end
+
+    fn get_or(self, key: string, default: string) -> string is
+        if !self.has(key) is return default end
+        return self.get(key)
+    end
+
+    ;; Value at `key` as a number. `0.0` if absent or not numeric.
+    fn get_number(self, key: string) -> f64 is
+        return hk_get_number(self._handle, key)
+    end
+
+    ;; Value at `key` rounded down to an int. `0` if absent or not numeric.
+    fn get_int(self, key: string) -> int is
+        return conv::float_to_int(self.get_number(key))
+    end
+
+    ;; Value at `key` as a bool. `false` if absent or not a bool.
+    fn get_bool(self, key: string) -> bool is
+        return hk_get_bool(self._handle, key) == 1
+    end
+
+    ;; `"string"` | `"number"` | `"bool"` | `"array"` | `"map"` | `"none"`.
+    fn type_of(self, key: string) -> string is
+        return hk_type_of(self._handle, key)
+    end
+
+    ;; Number of items in the array at `key`, or `-1` if it isn't one.
+    fn array_len(self, key: string) -> int is
+        return hk_array_len(self._handle, key)
+    end
+
+    ;; Element `index` of the array at `key`, stringified.
+    fn array_get(self, key: string, index: int) -> string is
+        return hk_array_get_string(self._handle, key, index)
+    end
+
+    fn array_get_number(self, key: string, index: int) -> f64 is
+        return hk_array_get_number(self._handle, key, index)
+    end
+
+    ;; The whole array at `key`, as `[string]` — convenient for `for x in ...`.
+    fn array(self, key: string) -> [string] is
+        let n = self.array_len(key)
+        let mut out: [string] = []
+        let mut i = 0
+        while i < n is
+            out.push(self.array_get(key, i))
+            i += 1
+        end
+        return out
+    end
+
+    ;; Serialize the whole (possibly `resolve`d) document back to `.hk` text.
+    fn to_string_hk(self) -> string is
+        return hk_serialize(self._handle)
+    end
+
+    ;; Release the native handle. Safe to call more than once.
+    fn free(self) is
+        hk_free(self._handle)
+    end
+end
