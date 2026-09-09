@@ -1,1 +1,15 @@
+[package]
+-> name        => hk-parser
+-> version     => 0.3.2
+-> description => H# bindings for hk-parser: parses/serializes HackerOS .hk config files (sections, typed values, arrays, ${...} interpolation) without re-implementing the grammar in H#
+-> author      => HackerOS Team
+-> license     => MIT
 
+[build]
+-> lang   => h#
+-> entry  => src/bytes-io/main.h#
+-> output => build/bytes-io
+-> emit   => lib
+
+[deps]
+-> hk_parser => dynamic
