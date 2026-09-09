@@ -355,6 +355,47 @@ error: Expected key or map header
   hint: every non-blank, non-comment line must start with one or more '-' followed by '>', e.g. "-> key => value"
 ```
 
+## H# bindings (`bytes-io`)
+
+Since 3.2.2, this repo also ships H# bindings so H# code — including the
+`bytes` package manager itself, which currently reads `Bytes.hk`/`bytes.hk`
+through its own small hand-rolled reader in `src/config.h#` — can parse
+`.hk` files through this crate's real, full grammar instead:
+
+```hsharp
+use "bytes-io" from "hk"
+
+let cfg = hk::parse_file("config.hk")
+if !cfg.is_valid() is
+    write("hk error: " + hk::last_error())
+else is
+    cfg.resolve()  ;; expand ${...} references, in place
+    write(cfg.get("metadata.name"))
+    for author in cfg.array("metadata.authors") is
+        write(author)
+    end
+    cfg.free()
+end
+```
+
+How it fits together:
+
+- `src/ffi.rs` is a thin `extern "C"` adapter (handle-based, with a
+  `hk_last_error()`/`hk_free_string()` pair for error/memory handling)
+  over the existing `parse_hk`/`resolve_interpolations`/`serialize_hk`/
+  `HkValue` API — no parsing logic is duplicated there.
+- `Cargo.toml`'s `crate-type` includes `"cdylib"`, so `cargo build --release`
+  also produces `target/release/libhk_parser.so` (`.dylib` on macOS).
+- `src/bytes-io/main.h#` is the H# side: an `extern dynamic [c, "hk_parser"]`
+  block plus a friendly `HkConfig` wrapper, in the same style as the
+  `std/toml.h#`/`std/yaml.h#`/`std/json.h#` modules.
+- `Bytes.hk` at the repo root is this H# library's own manifest (for the
+  `bytes` package manager), separate from the Cargo build above.
+
+Build the native library once (`cargo build --release`), make sure
+`libhk_parser.so` is on the loader's search path, then `use "bytes-io"`
+from any H# project.
+
 ## Contributing
 
 Contributions welcome! Fork the repo, create a branch, submit a PR.
@@ -365,15 +406,17 @@ Contributions welcome! Fork the repo, create a branch, submit a PR.
 
 Project layout (since 3.2.1 — previously one big `src/lib.rs`):
 
-| File               | Contents                                              |
-|--------------------|--------------------------------------------------------|
-| `src/value.rs`     | `HkValue`, `HkConfig`                                  |
-| `src/error.rs`     | `HkError`, `render`/`pretty_print`                      |
-| `src/parser.rs`    | `parse_hk`, `load_hk_file`, everything they call        |
-| `src/resolve.rs`   | `resolve_interpolations` (`${...}` interpolation)       |
-| `src/serialize.rs` | `serialize_hk`, `write_hk_file`                          |
-| `src/tests.rs`     | the test suite                                          |
-| `src/lib.rs`       | module declarations + the crate-root `pub use` re-exports |
+| File                    | Contents                                              |
+|-------------------------|--------------------------------------------------------|
+| `src/value.rs`          | `HkValue`, `HkConfig`                                  |
+| `src/error.rs`          | `HkError`, `render`/`pretty_print`                      |
+| `src/parser.rs`         | `parse_hk`, `load_hk_file`, everything they call        |
+| `src/resolve.rs`        | `resolve_interpolations` (`${...}` interpolation)       |
+| `src/serialize.rs`      | `serialize_hk`, `write_hk_file`                          |
+| `src/ffi.rs`            | C ABI adapter for the H# `bytes-io` bindings            |
+| `src/bytes-io/main.h#`  | the H# bindings themselves ("bytes-io")                 |
+| `src/tests.rs`          | the Rust test suite                                     |
+| `src/lib.rs`            | module declarations + the crate-root `pub use` re-exports |
 
 ## License
 
@@ -383,6 +426,18 @@ MIT License. See [LICENSE](LICENSE).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history. Highlights of the
 latest release:
+
+### 3.2.2
+
+- **Added:** H# bindings ("bytes-io") — see [H# bindings](#h-bindings-bytes-io)
+  above. New `src/ffi.rs` (a thin `extern "C"` adapter over the
+  existing parse/resolve/serialize API, no grammar duplicated) and
+  `src/bytes-io/main.h#` (the H# side). `Cargo.toml`'s `crate-type`
+  now includes `"cdylib"` so `cargo build --release` also produces
+  `libhk_parser.so`/`.dylib`. `resolve::get_value_by_path` is now
+  `pub(crate)` so the FFI layer can reuse the same dotted-path walk
+  `${...}` interpolation already used, instead of a second one.
+  `Bytes.hk` at the repo root is the new H# library's own manifest.
 
 ### 3.2.1
 
