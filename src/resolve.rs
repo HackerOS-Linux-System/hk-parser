@@ -115,7 +115,13 @@ fn resolve_reference(
     cloned_value.as_string()
 }
 
-fn get_value_by_path<'a>(path: &str, config: &'a HkConfig) -> Option<&'a HkValue> {
+/// `pub(crate)` (was private) so `ffi.rs`'s dotted-path lookups
+/// (`hk_has`/`hk_get_*`/`hk_type_of`/`hk_map_key_*` — see that module's
+/// doc comment) can reuse the exact same `"section.key[idx]"` resolution
+/// `${...}` interpolation already relies on, instead of a second,
+/// independently-maintained copy of the same walk that could drift out
+/// of sync with this one.
+pub(crate) fn get_value_by_path<'a>(path: &str, config: &'a HkConfig) -> Option<&'a HkValue> {
     let bracket_re = Regex::new(r"([^\[\].]+)(?:\[(\d+)\])?").unwrap();
     let mut parts = Vec::new();
     for cap in bracket_re.captures_iter(path) {
