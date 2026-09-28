@@ -11,8 +11,14 @@ extern dynamic [c, "hk_parser"] is
     fn hk_array_len(handle: int, key: string) -> int
     fn hk_array_get_string(handle: int, key: string, index: int) -> string
     fn hk_array_get_number(handle: int, key: string, index: int) -> f64
+    ;; Key enumeration for a map/section whose *keys* are themselves the
+    ;; data (a dep name, a feature name, ...) rather than a fixed field
+    ;; set — `""` means the document root (top-level section names).
+    fn hk_map_key_count(handle: int, key: string) -> int
+    fn hk_map_key_at(handle: int, key: string, index: int) -> string
     fn hk_serialize(handle: int) -> string
     fn hk_last_error() -> string
+    fn hk_free_string(s: string)
 end
 
 use "std -> conv" from "conv"
@@ -112,6 +118,28 @@ impl HkConfig is
         let mut i = 0
         while i < n is
             out.push(self.array_get(key, i))
+            i += 1
+        end
+        return out
+    end
+
+    ;; Number of keys in the map/section at `key`, or `-1` if it isn't one.
+    ;; Pass `""` for the document root (top-level section names).
+    fn map_key_count(self, key: string) -> int is
+        return hk_map_key_count(self._handle, key)
+    end
+
+    ;; Every key of the map/section at `key`, in file order — for a
+    ;; `[section]` whose *keys* are the data (`[deps]`'s dependency
+    ;; names, `[features]`'s feature names, a `-->` sub-map's own keys,
+    ;; ...) rather than a fixed, known-ahead-of-time field set. Pass
+    ;; `""` for the document root, to enumerate top-level section names.
+    fn keys(self, key: string) -> [string] is
+        let n = self.map_key_count(key)
+        let mut out: [string] = []
+        let mut i = 0
+        while i < n is
+            out.push(hk_map_key_at(self._handle, key, i))
             i += 1
         end
         return out
