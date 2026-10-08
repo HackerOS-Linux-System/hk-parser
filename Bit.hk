@@ -1,15 +1,34 @@
 [package]
 -> name        => hk-parser
 -> version     => 0.3.2
--> description => H# bindings for hk-parser: parses/serializes HackerOS .hk config files (sections, typed values, arrays, ${...} interpolation) without re-implementing the grammar in H#
--> author      => HackerOS Team
+-> description => H# bindings for hk-parser: parses and serializes HackerOS .hk config files (sections, typed values, arrays, interpolation) without re-implementing the grammar in H#
+-> authors     => ["HackerOS Team <hackeros068@gmail.com>"]
 -> license     => MIT
+-> lang        => h#
+
+[edition]
+-> edition => 2026
+
+[layout]
+-> lib-entry => src/bytes-io/main.h#
 
 [build]
--> lang   => h#
--> entry  => src/bytes-io/main.h#
--> output => build/bytes-io
--> emit   => lib
+-> link => static
+-> native          => cargo build --release --lib
+-> native-lib-path => target/release
+-> native-skip-if  => target/release/libhk_parser.a
 
-[deps]
--> hk_parser => dynamic
+[lib]
+-> output => hlib
+
+[default-build]
+-> profile => release
+-> emit    => hlib
+
+[commands]
+-> rust-test
+--> run => cargo test
+--> description => Run the Rust test-suite of the parser
+-> publish-dry-run
+--> run => cargo publish --dry-run
+--> description => Check that the crate can be published
