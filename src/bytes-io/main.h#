@@ -1,4 +1,4 @@
-extern dynamic [c, "hk_parser"] is
+extern static [c, "hk_parser"] is
     fn hk_parse(text: string) -> int
     fn hk_parse_file(path: string) -> int
     fn hk_resolve(handle: int) -> int
