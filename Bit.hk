@@ -10,7 +10,7 @@
 -> edition => 2026
 
 [layout]
--> lib-entry => src/bytes-io/main.h#
+-> lib-entry => src/bit-io/main.h#
 
 [build]
 -> link => static
