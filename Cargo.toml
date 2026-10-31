@@ -19,15 +19,33 @@ colored = "3.1.1"
 clap = { version = "4.6.2", features = ["derive"] }
 anyhow = "1.0.103"
 
+# Lua bindings (LuaRocks module) — opt-in, see `[features]` and `luarocks/`.
+mlua = { version = "0.12", optional = true, default-features = false }
+
+[features]
+default = []
+# Native Lua module (`require "hk_parser_core"`). Pick exactly ONE Lua flavour
+# below; `luarocks-build-rust-mlua` selects it automatically from the Lua
+# version LuaRocks runs under.
+lua     = ["dep:mlua", "mlua/module"]
+lua51   = ["lua", "mlua/lua51"]
+lua52   = ["lua", "mlua/lua52"]
+lua53   = ["lua", "mlua/lua53"]
+lua54   = ["lua", "mlua/lua54"]
+lua55   = ["lua", "mlua/lua55"]
+luajit  = ["lua", "mlua/luajit"]
+luajit52 = ["lua", "mlua/luajit52"]
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"
 
 [lib]
 name = "hk_parser"
 path = "src/lib.rs"
-crate-type = ["rlib", "staticlib"]
+# `cdylib` produces libhk_parser.so — the C ABI from `src/ffi.rs` and, with a
+# `lua5x`/`luajit` feature, the native Lua module (see `luarocks/`).
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [[bin]]
 name = "hk-parser"
 path = "main.rs"
-
