@@ -1,4 +1,175 @@
 // cargo
 // rustc
 
-> cargo build --release
+;; ── Funkcje pomocnicze ────────────────────────────────────────────────────────
+
+: show_help def
+    ~> hk-parser build.hl - uzycie: hl build.hl -- <cel> [<wariant-lua>]
+    ~>
+    ~>   release (domyslny)  biblioteka + CLI (cargo build --release)
+    ~>   debug               cargo build
+    ~>   test                testy Rusta (cargo test)
+    ~>   lint                cargo clippy --all-targets
+    ~>   doc                 cargo doc --no-deps
+    ~>   lua [wariant]       modul natywny Lua -> dist/lua/hk_parser_core.so
+    ~>   lua-test [wariant]  modul + testy Lua (luarocks/test/run.lua)
+    ~>   lua-install         luarocks --local make (wymaga luarocks)
+    ~>   all                 test + lua-test + release
+    ~>   clean               cargo clean + rm -rf dist
+    ~>
+    ~> Warianty Lua: lua51 lua52 lua53 lua54 (domyslny) lua55 luajit
+done
+
+;; Ustawia _lf (feature Cargo) i _lbin (interpreter) z @arg1.
+: pick_lua def
+    ? switch @arg1
+    | lua51
+        % _lf = lua51
+        % _lbin = lua5.1
+    | lua52
+        % _lf = lua52
+        % _lbin = lua5.2
+    | lua53
+        % _lf = lua53
+        % _lbin = lua5.3
+    | lua55
+        % _lf = lua55
+        % _lbin = lua5.5
+    | luajit
+        % _lf = luajit
+        % _lbin = luajit
+    | *
+        % _lf = lua54
+        % _lbin = lua5.4
+    done
+done
+
+;; Buduje modul natywny dla wariantu z pick_lua i kopiuje go do dist/lua/.
+: lua_build def
+    -- pick_lua
+    ~> Buduje modul natywny Lua (feature: @_lf)...
+    >> cargo build --release --lib --features @_lf
+    ? err
+        ~> BLAD: cargo build --features @_lf nie powiodl sie
+        > exit 1
+    done
+    > mkdir -p dist/lua
+    > bash -c 'for f in target/release/libhk_parser.so target/release/libhk_parser.dylib; do [ -f "$f" ] && cp "$f" dist/lua/hk_parser_core.so; done; [ -f dist/lua/hk_parser_core.so ]'
+    ? err
+        ~> BLAD: nie znaleziono zbudowanej biblioteki w target/release/
+        > exit 1
+    done
+    ~> Modul: dist/lua/hk_parser_core.so
+done
+
+;; Uruchamia testy Lua na module z dist/lua/ (po lua_build).
+: lua_run_tests def
+    ::which @_lbin
+    ? err
+        ~> BLAD: brak interpretera '@_lbin' w PATH (zainstaluj go albo wybierz inny wariant)
+        > exit 1
+    done
+    ~> Testy Lua (@_lbin)...
+    >> bash -c "LUA_PATH='luarocks/lua/?.lua' LUA_CPATH='dist/lua/?.so' @_lbin luarocks/test/run.lua"
+    ? err
+        ~> BLAD: testy Lua nie przeszly
+        > exit 1
+    done
+done
+
+: do_release def
+    ~> === hk-parser: build release ===
+    > cargo build --release
+    ? err
+        ~> BLAD: cargo build --release nie powiodl sie
+        > exit 1
+    done
+    ~> Gotowe: target/release/hk-parser, libhk_parser.{a,so}
+done
+
+: do_test def
+    ~> === hk-parser: testy Rusta ===
+    > cargo test
+    ? err
+        ~> BLAD: testy Rusta nie przeszly
+        > exit 1
+    done
+done
+
+;; ── Wybor celu ────────────────────────────────────────────────────────────────
+
+? switch @arg0
+| release
+    -- do_release
+| debug
+    ~> === hk-parser: build debug ===
+    > cargo build
+    ? err
+        ~> BLAD: cargo build nie powiodl sie
+        > exit 1
+    done
+| test
+    -- do_test
+| lint
+    ~> === hk-parser: clippy ===
+    > cargo clippy --all-targets
+    ? err
+        ~> BLAD: clippy zglosil problemy (lub nie jest zainstalowany: rustup component add clippy)
+        > exit 1
+    done
+| doc
+    ~> === hk-parser: dokumentacja ===
+    > cargo doc --no-deps
+    ? err
+        ~> BLAD: cargo doc nie powiodl sie
+        > exit 1
+    done
+| lua
+    ~> === hk-parser: modul Lua ===
+    -- lua_build
+| lua-test
+    ~> === hk-parser: modul Lua + testy ===
+    -- lua_build
+    -- lua_run_tests
+    ~> Gotowe.
+| lua-install
+    ~> === hk-parser: instalacja rocka (LuaRocks, --local) ===
+    ::which luarocks
+    ? err
+        ~> BLAD: brak 'luarocks' w PATH. Zainstaluj go oraz backend:
+        ~>   luarocks install luarocks-build-rust-mlua
+        > exit 1
+    done
+    > luarocks --local make luarocks/hk-parser-scm-1.rockspec
+    ? err
+        ~> BLAD: luarocks make nie powiodl sie
+        > exit 1
+    done
+    ~> Zainstalowano. Sprawdz: lua -e 'print(require("hk_parser").VERSION)'
+| all
+    ~> === hk-parser: pelny build ===
+    -- do_test
+    -- lua_build
+    -- lua_run_tests
+    -- do_release
+    ~> Gotowe.
+| clean
+    ~> === hk-parser: clean ===
+    > cargo clean
+    > rm -rf dist
+    ~> Wyczyszczono target/ i dist/.
+| help
+    -- show_help
+| *
+    ;; Brak argumentu = domyslny build release; cokolwiek innego = nieznany cel.
+    ;; Kolejnosc ma znaczenie: pominiety blok `? ok` zeruje "ostatni kod wyjscia",
+    ;; wiec `? ok` + `? err` jeden po drugim nie dziala — `? err` idzie PIERWSZY
+    ;; (konczy sie `exit 1`), a build release uruchamia sie dopiero po nim.
+    >> test -z "@arg0"
+    ? err
+        ~> Nieznany cel: @arg0
+        -- show_help
+        > exit 1
+    done
+    -- do_release
+done
