@@ -1,1 +1,198 @@
+name: build
 
+# Uruchamianie:
+#   * push / pull_request  -> buduje WSZYSTKO (rust + lua + h#/bit)
+#   * Actions -> build -> "Run workflow" -> zaznacz co zbudowac:
+#       all     wszystko (domyslnie; ignoruje pojedyncze pola ponizej)
+#       rust    biblioteka + CLI + testy Rusta
+#       lua     modul natywny Lua (5.1-5.4, LuaJIT) + paczka LuaRocks
+#       hsharp  bindingi H# (bit.io): pobiera h# i bit, odpala `bit`
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: "Zbuduj wszystko (rust + lua + h#/bit)"
+        type: boolean
+        default: true
+      rust:
+        description: "Rust (cargo build + test)"
+        type: boolean
+        default: false
+      lua:
+        description: "Lua (modul natywny + LuaRocks)"
+        type: boolean
+        default: false
+      hsharp:
+        description: "H# / bit.io (pobiera h# i bit, uruchamia bit)"
+        type: boolean
+        default: false
+      hsharp_version:
+        description: "Tag wydania H-Sharp (binarka 'hsharp' -> h#); gdy brak takiego wydania - uzyty zostanie najnowszy"
+        type: string
+        default: "v1.0"
+      bit_version:
+        description: "Tag wydania bit"
+        type: string
+        default: "v0.2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Zamienia checkboxy na trzy proste flagi. Zdarzenia inne niz reczne
+  # uruchomienie (push, PR) buduja wszystko.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.p.outputs.rust }}
+      lua: ${{ steps.p.outputs.lua }}
+      hsharp: ${{ steps.p.outputs.hsharp }}
+    steps:
+      - id: p
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_ALL: ${{ inputs.all }}
+          IN_RUST: ${{ inputs.rust }}
+          IN_LUA: ${{ inputs.lua }}
+          IN_HSHARP: ${{ inputs.hsharp }}
+        run: |
+          pick() { # $1 = wartosc pola
+            if [ "$EVENT" != "workflow_dispatch" ] || [ "$IN_ALL" = "true" ] || [ "$1" = "true" ]; then
+              echo true
+            else
+              echo false
+            fi
+          }
+          {
+            echo "rust=$(pick "$IN_RUST")"
+            echo "lua=$(pick "$IN_LUA")"
+            echo "hsharp=$(pick "$IN_HSHARP")"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # ── Rust ────────────────────────────────────────────────────────────────────
+  rust:
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-release
+          path: |
+            target/release/hk-parser
+            target/release/libhk_parser.a
+            target/release/libhk_parser.so
+
+  # ── Lua: modul natywny dla kazdej wersji Lua ────────────────────────────────
+  lua:
+    needs: plan
+    if: needs.plan.outputs.lua == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { feature: lua51,  pkg: lua5.1, bin: lua5.1 }
+          - { feature: lua52,  pkg: lua5.2, bin: lua5.2 }
+          - { feature: lua53,  pkg: lua5.3, bin: lua5.3 }
+          - { feature: lua54,  pkg: lua5.4, bin: lua5.4 }
+          - { feature: luajit, pkg: luajit, bin: luajit }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Zainstaluj interpreter Lua
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
+      - name: Zbuduj modul natywny
+        run: cargo build --release --lib --features ${{ matrix.feature }}
+      - name: Testy Lua
+        run: |
+          mkdir -p dist/lua
+          cp target/release/libhk_parser.so dist/lua/hk_parser_core.so
+          LUA_PATH='luarocks/lua/?.lua' LUA_CPATH='dist/lua/?.so' ${{ matrix.bin }} luarocks/test/run.lua
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lua-module-${{ matrix.feature }}
+          path: dist/lua/hk_parser_core.so
+
+  # ── Lua: paczka LuaRocks (rockspec + backend rust-mlua) ─────────────────────
+  luarocks:
+    needs: plan
+    if: needs.plan.outputs.lua == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Zainstaluj luarocks
+        run: sudo apt-get update && sudo apt-get install -y luarocks
+      - name: Backend + make + test
+        run: |
+          luarocks --local install luarocks-build-rust-mlua
+          luarocks --local make luarocks/hk-parser-scm-1.rockspec
+          luarocks --local test luarocks/hk-parser-scm-1.rockspec
+
+  # ── H# / bit.io ─────────────────────────────────────────────────────────────
+  # 1. pobiera binarke H# jako `h#`      (H-Sharp, asset `hsharp`)
+  # 2. pobiera `bit`
+  # 3. odpala `bit` -> czyta Bit.hk: cargo (czesc natywna) -> h# -> hk-parser.hlib
+  hsharp:
+    needs: plan
+    if: needs.plan.outputs.hsharp == 'true'
+    runs-on: ubuntu-latest
+    env:
+      HSHARP_VERSION: ${{ inputs.hsharp_version || 'v1.0' }}
+      BIT_VERSION: ${{ inputs.bit_version || 'v0.2' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable   # Bit.hk: native => cargo build
+
+      - name: Pobierz H# (hsharp -> h#)
+        run: |
+          base=https://github.com/HackerOS-Linux-System/H-Sharp/releases
+          tag="$HSHARP_VERSION"
+          if ! curl -fsSL -o /tmp/hsharp "$base/download/$tag/hsharp"; then
+            # Taki tag moze jeszcze nie istniec - nie wywracaj builda, ale glosno ostrzez.
+            tag=$(curl -fsSIL -o /dev/null -w '%{url_effective}' "$base/latest" | sed 's|.*/tag/||')
+            echo "::warning::H-Sharp $HSHARP_VERSION nie ma assetu 'hsharp' - uzywam najnowszego wydania: $tag"
+            curl -fsSL -o /tmp/hsharp "$base/download/$tag/hsharp"
+          fi
+          sudo install -m 0755 /tmp/hsharp '/usr/local/bin/h#'
+          echo "HSHARP_TAG=$tag" >> "$GITHUB_ENV"
+          'h#' --version
+
+      - name: Zainstaluj biblioteke standardowa H# (std/)
+        # `h#` szuka jej w /usr/lib/HackerOS/H#/std ("h# utils" na HackerOS).
+        # Bierzemy std z tagu zgodnego z binarka, a gdy go brak - z domyslnej galezi.
+        run: |
+          repo=https://github.com/HackerOS-Linux-System/H-Sharp.git
+          git clone --depth 1 --branch "$HSHARP_TAG" "$repo" /tmp/hsharp-src \
+            || git clone --depth 1 "$repo" /tmp/hsharp-src
+          sudo mkdir -p '/usr/lib/HackerOS/H#'
+          sudo cp -r /tmp/hsharp-src/std '/usr/lib/HackerOS/H#/std'
+
+      - name: Pobierz bit
+        run: |
+          curl -fsSL -o /tmp/bit "https://github.com/HackerOS-Linux-System/bit/releases/download/$BIT_VERSION/bit"
+          sudo install -m 0755 /tmp/bit /usr/local/bin/bit
+          bit help | head -3
+
+      - name: Uruchom bit
+        run: bit
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hsharp-hlib
+          path: cache/build/release/
