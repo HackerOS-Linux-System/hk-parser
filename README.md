@@ -42,6 +42,7 @@ This README provides a comprehensive guide, including installation, usage exampl
   - [Serialization Example](#serialization-example)
   - [Derive Macro Example](#derive-macro-example)
   - [Error Handling Example](#error-handling-example)
+- [Lua bindings (LuaRocks)](#lua-bindings-luarocks)
 - [Contributing](#contributing)
 - [License](#license)
 - [Changelog](#changelog)
@@ -396,6 +397,28 @@ Build the native library once (`cargo build --release`), make sure
 `libhk_parser.so` is on the loader's search path, then `use "bytes-io"`
 from any H# project.
 
+## Lua bindings (LuaRocks)
+
+`hk-parser` ships a LuaRocks package (`luarocks/`): the Rust parser compiled
+into a native Lua module (via [mlua](https://crates.io/crates/mlua)) plus a
+small pure-Lua facade. Works with Lua 5.1 – 5.4 and LuaJIT (5.5 is wired up
+through the `lua55` feature but untested).
+
+```sh
+luarocks install luarocks-build-rust-mlua      # build backend (needs cargo)
+luarocks --local make luarocks/hk-parser-scm-1.rockspec
+```
+
+```lua
+local hk  = require("hk_parser")
+local cfg = assert(hk.load("config.hk", { resolve = true }))
+print(cfg:get_string("global.name"), cfg:get_number("global.database.port", 5432))
+cfg:set("global.version", 3):write_file("config.hk")
+```
+
+Full API, error conventions and build notes: [`luarocks/README.md`](luarocks/README.md).
+Build and test everything with `hl build.hl -- all` (see `build.hl`).
+
 ## Contributing
 
 Contributions welcome! Fork the repo, create a branch, submit a PR.
@@ -426,6 +449,23 @@ MIT License. See [LICENSE](LICENSE).
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history. Highlights of the
 latest release:
+
+### Unreleased
+
+- **Added:** Lua bindings for LuaRocks (`src/lua.rs`, `luarocks/`) behind the
+  `lua51`…`lua55` / `luajit` Cargo features; `crate-type` now includes
+  `cdylib`; `build.rs` adds the macOS linker flags for the Lua module.
+- **Added:** `set_value_by_path`, `remove_value_by_path`, segment-based
+  variants, `get_value_by_keys`, `parse_path`, `HkValue::type_name`; and
+  `get_value_by_path` is now public.
+- **Fixed:** `${a.b[4][0]}` — chained array indices in paths and
+  interpolation (previously "invalid reference").
+- **Fixed:** `examples/config.hk` did not parse (two skipped nesting levels).
+- **Added:** CI — `build.yml` (manual run lets you pick `all` / Rust / Lua /
+  H#+bit; the H# job downloads `h#` and `bit` and runs `bit`) and
+  `publish.yml` (manual: crates.io / LuaRocks / both, dry-run by default).
+- **Changed:** `build.hl` now has `debug`/`test`/`lint`/`doc`/`lua`/
+  `lua-test`/`lua-install`/`all`/`clean`/`help` targets.
 
 ### 3.2.2
 
