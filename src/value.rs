@@ -16,6 +16,19 @@ pub enum HkValue {
 }
 
 impl HkValue {
+    /// Stable, lowercase name of the variant: `"string"`, `"number"`,
+    /// `"bool"`, `"array"` or `"map"`. Same vocabulary `hk_type_of` (C ABI)
+    /// and the Lua bindings' `type_of` use.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::String(_) => "string",
+            Self::Number(_) => "number",
+            Self::Bool(_) => "bool",
+            Self::Array(_) => "array",
+            Self::Map(_) => "map",
+        }
+    }
+
     pub fn as_string(&self) -> Result<String, HkError> {
         match self {
             Self::String(s) => Ok(s.clone()),
