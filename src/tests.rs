@@ -487,3 +487,133 @@ fn strip_ansi(s: &str) -> String {
     }
     out
 }
+
+// ─── Path mutation (set / remove) and helpers ───────────────────────────────
+
+const MUT_SAMPLE: &str = "\
+[package]
+-> name => demo
+-> authors => [\"a\", \"b\"]
+-> meta
+--> license => MIT
+
+[libs]
+-> .hl-download => url
+";
+
+#[test]
+fn type_name_vocabulary() {
+    assert_eq!(HkValue::String("x".into()).type_name(), "string");
+    assert_eq!(HkValue::Number(1.0).type_name(), "number");
+    assert_eq!(HkValue::Bool(true).type_name(), "bool");
+    assert_eq!(HkValue::Array(vec![]).type_name(), "array");
+    assert_eq!(HkValue::Map(Default::default()).type_name(), "map");
+}
+
+#[test]
+fn set_replaces_existing_key_in_place() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    set_value_by_path(&mut cfg, "package.name", HkValue::String("renamed".into())).unwrap();
+    let keys: Vec<_> = cfg["package"].as_map().unwrap().keys().cloned().collect();
+    assert_eq!(keys, vec!["name", "authors", "meta"], "existing key must keep its position");
+    assert_eq!(get_value_by_path("package.name", &cfg).unwrap().as_string().unwrap(), "renamed");
+}
+
+#[test]
+fn set_creates_missing_sections_and_maps() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    set_value_by_path(&mut cfg, "build.opt.level", HkValue::Number(3.0)).unwrap();
+    assert_eq!(get_value_by_path("build.opt.level", &cfg).unwrap().as_number().unwrap(), 3.0);
+    // new section is appended after the existing ones
+    let sections: Vec<_> = cfg.keys().cloned().collect();
+    assert_eq!(sections, vec!["package", "libs", "build"]);
+}
+
+#[test]
+fn set_array_element_replace_and_append() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    set_value_by_path(&mut cfg, "package.authors[1]", HkValue::String("z".into())).unwrap();
+    set_value_by_path(&mut cfg, "package.authors[2]", HkValue::String("c".into())).unwrap();
+    let arr = get_value_by_path("package.authors", &cfg).unwrap().as_array().unwrap().clone();
+    let strs: Vec<_> = arr.iter().map(|v| v.as_string().unwrap()).collect();
+    assert_eq!(strs, vec!["a", "z", "c"]);
+    // a gap is an error, not a silent hole
+    assert!(set_value_by_path(&mut cfg, "package.authors[9]", HkValue::Bool(true)).is_err());
+}
+
+#[test]
+fn set_rejects_bad_targets() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    // scalar at top level is not representable
+    assert!(set_value_by_path(&mut cfg, "loose", HkValue::Bool(true)).is_err());
+    // cannot walk through a string
+    assert!(set_value_by_path(&mut cfg, "package.name.sub", HkValue::Bool(true)).is_err());
+    // cannot index a non-array
+    assert!(set_value_by_path(&mut cfg, "package.name[0]", HkValue::Bool(true)).is_err());
+    assert!(set_value_by_path(&mut cfg, "", HkValue::Bool(true)).is_err());
+    // a whole section can be (re)placed with a map
+    set_value_by_path(&mut cfg, "fresh", HkValue::Map(Default::default())).unwrap();
+    assert!(cfg.contains_key("fresh"));
+}
+
+#[test]
+fn segments_reach_keys_that_dotted_paths_cannot() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    assert_eq!(
+        get_value_by_keys(&cfg, &["libs", ".hl-download"]).unwrap().as_string().unwrap(),
+        "url"
+    );
+    set_value_by_segments(
+        &mut cfg,
+        &[PathSeg::key("libs"), PathSeg::key("a.b")],
+        HkValue::String("dotted".into()),
+    )
+    .unwrap();
+    assert_eq!(get_value_by_keys(&cfg, &["libs", "a.b"]).unwrap().as_string().unwrap(), "dotted");
+    assert!(remove_value_by_segments(&mut cfg, &[PathSeg::key("libs"), PathSeg::key("a.b")]).is_some());
+    assert!(get_value_by_keys(&cfg, &["libs", "a.b"]).is_none());
+}
+
+#[test]
+fn remove_keeps_order_and_returns_value() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    let gone = remove_value_by_path(&mut cfg, "package.authors").unwrap();
+    assert_eq!(gone.as_array().unwrap().len(), 2);
+    let keys: Vec<_> = cfg["package"].as_map().unwrap().keys().cloned().collect();
+    assert_eq!(keys, vec!["name", "meta"]);
+    assert_eq!(remove_value_by_path(&mut cfg, "package.meta.license").unwrap().as_string().unwrap(), "MIT");
+    assert!(remove_value_by_path(&mut cfg, "package.nope").is_none());
+    assert!(remove_value_by_path(&mut cfg, "nope.nope").is_none());
+}
+
+#[test]
+fn remove_array_element_shifts_down() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    let gone = remove_value_by_path(&mut cfg, "package.authors[0]").unwrap();
+    assert_eq!(gone.as_string().unwrap(), "a");
+    let arr = get_value_by_path("package.authors", &cfg).unwrap().as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0].as_string().unwrap(), "b");
+}
+
+#[test]
+fn mutation_survives_serialize_roundtrip() {
+    let mut cfg = parse_hk(MUT_SAMPLE).unwrap();
+    set_value_by_path(&mut cfg, "package.version", HkValue::Number(1.5)).unwrap();
+    set_value_by_path(&mut cfg, "package.meta.tags", HkValue::Array(vec![HkValue::String("x y".into())])).unwrap();
+    let text = serialize_hk(&cfg);
+    let again = parse_hk(&text).unwrap();
+    assert_eq!(again, cfg);
+}
+
+#[test]
+fn nested_array_index_paths_resolve() {
+    let cfg = parse_hk("[arrays]\n-> mixed => [42, \"text\", [\"nested\", \"array\"]]\n-> grid => [[1, 2], [3, 4]]\n").unwrap();
+    assert_eq!(get_value_by_path("arrays.mixed[2][0]", &cfg).unwrap().as_string().unwrap(), "nested");
+    assert_eq!(get_value_by_path("arrays.grid[1][1]", &cfg).unwrap().as_number().unwrap(), 4.0);
+    assert!(get_value_by_path("arrays.grid[1][9]", &cfg).is_none());
+    assert!(get_value_by_path("arrays.mixed[0][0]", &cfg).is_none());
+    // single index and plain paths behave as before
+    assert_eq!(get_value_by_path("arrays.mixed[1]", &cfg).unwrap().as_string().unwrap(), "text");
+    assert!(get_value_by_path("arrays.mixed", &cfg).unwrap().as_array().is_ok());
+}
