@@ -23,8 +23,8 @@
 -> features
 --> compression => true
 --> logging
-----> level => debug
-----> file => /var/log/app.log
+---> level => debug
+---> file => /var/log/app.log
 
 ! 2. TABLICE
 [arrays]
@@ -46,10 +46,10 @@
 -> a.b.c => 42
 -> x.y.z => "nested value"
 -> array.of.objects
----> [0].name => first
----> [0].value => 100
----> [1].name => second
----> [1].value => 200
+--> [0].name => first
+--> [0].value => 100
+--> [1].name => second
+--> [1].value => 200
 
 ! 5. TYPY WARTOŚCI
 [types]
